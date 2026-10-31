@@ -2384,7 +2384,9 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
         ps->displayH = surfH;
         ps->renderW = appW;
         ps->renderH = appH;
-        if (dd->inst && appW > 0) {
+        // Caps-shrink on: scale comes from --preset / F1, not from whatever size the
+        // app picked (CoD4 starts windowed 1280x720 → would force "quality" 1.5x).
+        if (dd->inst && appW > 0 && !capsShrinkEnabled()) {
             dd->inst->scale = static_cast<float>(surfW) / static_cast<float>(appW);
         }
         if (zinkActive()) {
@@ -2405,7 +2407,7 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
             dd->inst->realW = hintW;
             dd->inst->realH = hintH;
             dd->inst->realFromSurface = true;
-            if (appW > 0) {
+            if (appW > 0 && !capsShrinkEnabled()) {
                 dd->inst->scale = static_cast<float>(hintW) / static_cast<float>(appW);
             }
         }

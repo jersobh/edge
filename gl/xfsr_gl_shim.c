@@ -614,7 +614,7 @@ static void ensure_dlsym(void) {
 XFSR_EXPORT void* dlsym(void* handle, const char* symbol) {
     ensure_dlsym();
     if (!real_dlsym) return NULL;
-    if (symbol && strcmp(symbol, "dlsym") == 0) return (void*)dlsym;
+    if (strcmp(symbol, "dlsym") == 0) return (void*)dlsym;
     return wrap_proc(symbol, real_dlsym(handle, symbol));
 }
 

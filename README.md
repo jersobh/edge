@@ -6,7 +6,7 @@
 
 FSR 1.0 for Linux games — wrap a title like `gamemoderun`, get more FPS by rendering lower and upscaling.
 
-**Current version:** [0.7.0](https://github.com/jersobh/xfsr/releases/tag/v0.7.0)
+**Current version:** [0.8.0](https://github.com/jersobh/xfsr/releases/tag/v0.8.0)
 
 **Roadmap:** [ROADMAP.md](ROADMAP.md) — adaptive FSR, profiles, auto-tune, dma-buf.  
 **Not in the layer:** true FSR 2/3/4 (need game motion vectors / AMD+Proton DLL upgrade — see ROADMAP §2).
@@ -17,9 +17,9 @@ Games spend most of their time drawing each frame. **xfsr** asks the game to dra
 
 You do **not** need the game to support FSR. xfsr hooks in through a **Vulkan layer** (same idea as MangoHud): it sits between the game and the GPU driver and rewrites the swapchain.
 
-**Works with:** native Vulkan, Proton/DXVK, and OpenGL via Zink (with a small `LD_PRELOAD` shim that fixes viewports).  
-**Modes:** same-GPU (default, peak FPS), `--hybrid` (dGPU render + iGPU `edge` upscale + one-way present), or `--offload` (often slower round-trip).  
-**Tested on:** hybrid laptops (e.g. NVIDIA dGPU + AMD iGPU).
+**Works with:** native Vulkan, Proton/DXVK (64-bit & 32-bit via automatic `PROTON_USE_WOW64=1`), and OpenGL via automatic Zink detection (with an `LD_PRELOAD` shim that remaps viewports, scissors, FBO blits, and SDL drawable queries).  
+**Modes:** Dual-GPU iGPU offload is enabled by default (`--offload` / `XFSR_OFFLOAD=1` with one-way iGPU presentation and automatic fused round-trip fallback), `--hybrid` (dGPU render + iGPU `edge` upscale + one-way present), or `--no-offload` (same-GPU).  
+**Tested on:** hybrid laptops (e.g. NVIDIA/AMD dGPU + AMD Vega iGPU).
 
 ### Max FPS on hybrid NVIDIA + AMD (e.g. GTX 1650 + Vega)
 
@@ -54,9 +54,9 @@ Avoid for FPS: plain `--offload` round-trip, `XFSR_IGPU_PRESENT=force` with Mang
 
 | Mode | How | When to use |
 |------|-----|-------------|
-| **Same-GPU** (default) | Game renders low-res on the GPU it already uses; that same GPU upscales and presents | **Peak FPS** |
-| **`--hybrid`** | dGPU low-res → transfer → iGPU `edge` upscale + **one-way present** (no back-haul) | Free dGPU for the game when one-way WSI works; quality on Vega |
-| **`--offload`** | Dual-GPU with possible round-trip back to dGPU WSI | Experiments — usually **not** max FPS on PCIe hybrids |
+| **Dual-GPU Offload** (default) | dGPU renders low-res → transfer → iGPU upscales + **one-way present** (or fused async round-trip fallback) | Free dGPU for the game while iGPU handles upscaling and display presentation |
+| **`--hybrid`** | dGPU low-res → transfer → iGPU `edge` upscale + **one-way present** | High-quality directional EdgePass upscale on iGPU |
+| **Same-GPU (`--no-offload`)** | Game renders low-res on the GPU it already uses; that same GPU upscales and presents | Single-GPU systems or when PCIe transfer overhead exceeds upscale cost |
 
 Presets control how hard it pushes:
 
@@ -95,10 +95,10 @@ Do **not** add `--zink` for native Vulkan. Prefer same-GPU over `--offload` for 
 
 You should see `xfsr-run: layer …` then **`[xfsr] layer active:`** (and later `force-scale` / `proxy ready` / `hotkeys:`) in the Steam console. If Mega Man / Proton never prints `[xfsr]`, the layer `.so` failed to load inside steamrt — reinstall from this tree (`./scripts/install-xfsr-run.sh`; the layer is linked with a pressure-vessel host-lib RPATH), fully quit Steam, clear leftover env, relaunch Steam, and retry.
 
-**32-bit Windows titles** (CoD4:MW, many 2000s D3D9 games): the layer is **x86_64 only**. Classic Proton loads 32-bit DXVK, so you can get `[xfsr] layer active` from helpers while the game never hits the layer (no `hotkeys:` / `proxy ready` / overlay). Force 64-bit DXVK via Wine Wow64:
+**32-bit Windows titles** (CoD4:MW, many 2000s D3D9/OpenGL games): the layer is **x86_64**. `xfsr-run` automatically exports `PROTON_USE_WOW64=1` for Proton launches so 32-bit Windows games run under 64-bit Wine Wow64 and load `libVkLayer_XFSR.so`:
 
 ```text
-PROTON_USE_WOW64=1 gamemoderun xfsr-run --mangohud --preset performance --overlay --no-rcas %command%
+gamemoderun xfsr-run --preset performance --overlay --no-rcas %command%
 ```
 
 Confirm with `hotkeys:` or `identity overlay armed` / `proxy ready` in the Steam console. Prefer **borderless windowed** so FSR can shrink (exclusive fullscreen often locks `app == display`).
@@ -113,18 +113,18 @@ set -e VK_ADD_IMPLICIT_LAYER_PATH VK_LAYER_PATH VK_IMPLICIT_LAYER_PATH VK_ICD_FI
 
 Confirm the layer is live: `xfsr-run --check`, or `XFSR_VERBOSE=1` (look for `proxy ready` / `force-scale` / `first present ok`). Auto-tune a preset: `./scripts/xfsr-auto-tune --apply`.
 
-**OpenGL only** (glmark2, native GL games) — X11 (do not set `XFSR_ZINK_WAYLAND=1`):
+**OpenGL titles** (glmark2, native GL, and Windows OpenGL games) — automatically detected (`auto` Zink mode) or forced with `--zink`:
 
 ```text
-xfsr-run --zink --mangohud --upscaler blit --preset ultra --no-rcas %command%
+xfsr-run --upscaler blit --preset ultra --no-rcas %command%
 ```
 
 ## Usage
 
 ```sh
 xfsr-run --help
-xfsr-run --mangohud --upscaler blit --preset ultra --no-rcas --overlay vkcube
-xfsr-run --zink --upscaler blit --preset ultra --no-rcas glmark2
+xfsr-run --upscaler blit --preset ultra --no-rcas --overlay vkcube
+xfsr-run --upscaler blit --preset ultra --no-rcas glmark2
 xfsr-run --layer-dir ./build --check
 ```
 
@@ -134,21 +134,21 @@ xfsr-run --layer-dir ./build --check
 | `--fsr 1` | FSR1 upscale (default) |
 | `--fsr 0` / `--blit` | Same scale, linear blit instead of FSR1 (launch as F3 off) |
 | `--upscaler fsr1\|blit\|nis\|edge` | Spatial upscaler (`edge` = heavier; hybrid default) |
-| `--edge-mode quality\|perf` | EdgePass quality (Di Zenzo + padded CAS) or perf/lite |
+| `--edge-mode quality\|perf` | EdgePass quality (sub-pixel edge tangent + CAS) or perf/lite |
 | `--edge-sharpness 0..1` | EdgePass post-scale sharpen (default 0.60) |
 | `--lod-bias auto\|off\|<float>` | Negative mip LOD on app samplers (default `auto` = `-log2(scale)`) |
 | `--lod-bias-offset <float>` | Added to LOD bias (e.g. `-0.5`) |
-| `--hybrid` | Offload + one-way + `edge`; same-GPU fallback if one-way fails |
+| `--hybrid` | Offload + one-way + `edge`; fused round-trip fallback if one-way fails |
 | `--gamescope` | Nest game at preset render size; gamescope upscales to `--output` (CS2) |
 | `--gamescope-filter fsr\|nis\|linear\|…` | Override gamescope `-F` (default from `--upscaler`) |
 | `--native` | No upscale — passthrough swapchain |
 | `--no-rcas` | Skip sharpening — usually more FPS |
-| `--offload` | dGPU render, iGPU FSR + present (one-way). Skip for CS2 if unstable |
-| `--one-way` / `--no-one-way` | iGPU present (default with `--offload`) or round-trip. One-way skips MangoHud and pins the xfsr overlay |
+| `--offload` / `--no-offload` | dGPU render, iGPU upscale + present (default: `--offload`) |
+| `--one-way` / `--no-one-way` | iGPU present (default with `--offload`) or fused round-trip. One-way skips MangoHud and pins the xfsr overlay |
 | `--mangohud` | FPS overlay. Not loaded on one-way; use the xfsr overlay instead |
 | `--controls` / `--no-controls` | In-game hotkeys + status toast (default on) |
 | `--overlay` | Pin the status strip at launch (`XFSR_OVERLAY=1`; Proton/Steam often eat F10) |
-| `--zink` | OpenGL via Zink + viewport shim (off by default) |
+| `--zink` / `--no-zink` | OpenGL via Zink + viewport/FBO/SDL shim (default: `auto` for OpenGL ELF & `.exe` binaries) |
 | `--print` | Show the env xfsr would set, then exit |
 | `--no-profile` | Ignore `~/.config/xfsr/profiles.conf` |
 | `--caps-shrink` / `--no-caps-shrink` | Allow/forbid smaller `maxImageExtent` (CS2 often needs off) |
@@ -229,7 +229,7 @@ Offload knobs (env; same as the flags above):
 
 ### OpenGL / Zink
 
-Pass **`--zink`** so `xfsr-run` sets Mesa Zink and preloads `libxfsr_gl_shim.so` (remaps `glViewport` / `glScissor`). Without `--zink`, native GL never hits the Vulkan layer — `--no-zink` on an OpenGL binary cannot upscale. Vulkan, DXVK, and Zink share one scale: render = window / preset, present = window, windowed or fullscreen. Native Vulkan `--offload` presents on the iGPU (one-way). Zink still round-trips: the NVIDIA driver presents the app swapchain itself, and an opaque one-way handle crashes it. `--no-one-way` forces round-trip for Vulkan too.
+`xfsr-run` automatically detects OpenGL Linux ELF and Windows PE (`.exe`) binaries and enables Mesa Zink alongside `libxfsr_gl_shim.so` (which remaps `glViewport`, `glScissor`, `glBlitFramebuffer`, and SDL drawable queries). You can also force Zink explicitly with **`--zink`** or disable it with `--no-zink`. Vulkan, DXVK, and Zink share one scale: render = window / preset, present = window, windowed or fullscreen. Both native Vulkan and Zink support one-way iGPU presentation (`--offload`, using monotonic opaque swapchain handles) as well as fused asynchronous round-trip offload (`--no-one-way`).
 
 **Wayland:** Vulkan FSR works (shrink-kick). OpenGL/Zink FSR works too — the GL shim shrinks `wl_egl_window` to render size so Zink asks for a shrunk swapchain. `xfsr-run --zink` still prefers X11 when both are available (often faster on hybrid NVIDIA+AMD); keep pure Wayland with `XFSR_ZINK_WAYLAND=1`. Native VK: `XFSR_VK_WAYLAND=1`.
 
@@ -247,12 +247,12 @@ Needs CMake ≥ 3.20, C++17, `glslc`, Vulkan loader. FSR1 headers: `third_party/
 
 ## Versioning
 
-- [`VERSION`](VERSION) — **0.7.0**
+- [`VERSION`](VERSION) — **0.8.0**
 - [`CHANGELOG.md`](CHANGELOG.md)
 - Tag `vX.Y.Z` → GitHub Actions builds the Linux package the install script downloads
 
 ```sh
-git tag v0.7.0 && git push origin v0.7.0
+git tag v0.8.0 && git push origin v0.8.0
 ```
 
 ## Credits

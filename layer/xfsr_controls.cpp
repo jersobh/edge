@@ -287,7 +287,7 @@ struct HudMetrics {
     int gpuC[2] = {-1, -1};
     char gpuTag[2][8] = {{0}, {0}};
     char busyPath[2][320] = {{0}, {0}};
-    char tempPath[2][512] = {{0}, {0}};
+    char tempPath[2][660] = {{0}, {0}};
     int gpuN = 0;
 };
 
@@ -338,7 +338,7 @@ void discoverGpus() {
         if (hd) {
             while (dirent* he = readdir(hd)) {
                 if (he->d_name[0] == '.') continue;
-                char tp[512];
+                char tp[660];
                 std::snprintf(tp, sizeof(tp), "%s/%s/temp1_input", hwmon, he->d_name);
                 const int milli = readSysInt(tp);
                 if (milli > 0) {
@@ -566,7 +566,6 @@ void tickAdaptiveLocked() {
     }
 
     const float targetMs = 1000.f / (g_rt.targetFps > 1.f ? g_rt.targetFps : 60.f);
-    const float downThresh = targetMs * 0.88f; // headroom → sharper (lower scale)
     const float upThresh = targetMs * 1.12f;   // miss target → lower res
     const auto sinceChange =
         std::chrono::duration<float>(now - g_rt.lastScaleChange).count();
@@ -643,7 +642,7 @@ void ensureEvdev() {
     if (!dir) return;
     while (dirent* ent = readdir(dir)) {
         if (std::strncmp(ent->d_name, "event", 5) != 0) continue;
-        char path[256];
+        char path[280];
         std::snprintf(path, sizeof(path), "/dev/input/%s", ent->d_name);
         int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
         if (fd < 0) continue;
@@ -1125,7 +1124,13 @@ void publishPresentStatus(const char* mode, uint32_t renderW, uint32_t renderH,
     if (displayH) g_rt.lastDisplayH = displayH;
     if (renderW) g_rt.lastRenderW = renderW;
     if (renderH) g_rt.lastRenderH = renderH;
-    if (renderW && displayW && renderW < displayW) {
+    // Only mirror the effective ratio into the preset when caps-shrink is off (in-game
+    // resolution defines scale). With caps-shrink on, --preset / F1 is authoritative —
+    // an app that ignores the clamp (e.g. windowed 1280x720 on 1080p) must not flip
+    // "performance" to "quality". Never clobber a pending F1 change either.
+    const char* cs = std::getenv("XFSR_CAPS_SHRINK");
+    const bool capsShrinkOff = cs && cs[0] == '0';
+    if (capsShrinkOff && !g_rt.recreate && renderW && displayW && renderW < displayW) {
         g_rt.scale = static_cast<float>(displayW) / static_cast<float>(renderW);
         g_rt.presetIdx = presetIndexFromScale(g_rt.scale);
     }

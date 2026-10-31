@@ -407,8 +407,29 @@ void FrameTransfer::resize(uint32_t w, uint32_t h, VkFormat fmt, uint32_t bpp) {
 }
 
 void FrameTransfer::resetPipeline() {
-    if (srcCtx) srcCtx->waitIdle();
-    if (dstCtx) dstCtx->waitIdle();
+    constexpr uint64_t kWaitTimeoutNs = 2000000000ull; // 2s
+    if (srcCtx && srcCtx->device) {
+        srcCtx->loadDispatch();
+        if (srcCtx->vk.WaitForFences) {
+            for (int i = 0; i < kSlots; ++i) {
+                if (slots[i].srcFence) {
+                    srcCtx->vk.WaitForFences(srcCtx->device, 1, &slots[i].srcFence, VK_TRUE,
+                                             kWaitTimeoutNs);
+                }
+            }
+        }
+    }
+    if (dstCtx && dstCtx->device) {
+        dstCtx->loadDispatch();
+        if (dstCtx->vk.WaitForFences) {
+            for (int i = 0; i < kSlots; ++i) {
+                if (slots[i].dstFence) {
+                    dstCtx->vk.WaitForFences(dstCtx->device, 1, &slots[i].dstFence, VK_TRUE,
+                                             kWaitTimeoutNs);
+                }
+            }
+        }
+    }
     produceIndex = 0;
     framesProduced = 0;
     roundTripReady = -1;

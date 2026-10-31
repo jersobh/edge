@@ -9,7 +9,18 @@ namespace {
 struct EdgeConsts {
     float sizes[4]; // renderW, renderH, displayW, displayH
     float opts[4];  // sharpness, swizzleBgra, mode(0=quality 1=perf), scale
+    float extra[4]; // beautify (0 = color-neutral, matches FSR1/NIS/blit)
 };
+
+// XFSR_EDGE_BEAUTIFY=1 re-enables the contrast/saturation grade (off by default so
+// edge output colors match the other upscalers).
+bool edgeBeautifyEnabled() {
+    static const bool on = [] {
+        const char* e = xfsrEnv("XFSR_EDGE_BEAUTIFY", "CROSSVULKAN_EDGE_BEAUTIFY");
+        return e && e[0] && e[0] != '0';
+    }();
+    return on;
+}
 
 float parseFloat01(const char* e) {
     float v = 0.f, frac = 0.f, place = 0.1f;
@@ -121,6 +132,7 @@ void fillUbo(EdgePass& pass, int slot, bool swizzle) {
                                             static_cast<float>(pass.renderH)
                                       : 1.f;
     c.opts[3] = sx > sy ? sx : sy;
+    c.extra[0] = edgeBeautifyEnabled() ? 1.f : 0.f;
     std::memcpy(pass.uboMapped[slot], &c, sizeof(c));
 }
 
@@ -266,14 +278,20 @@ void EdgePass::setSharpness(float s) {
 void EdgePass::setPerfMode(bool perf) { perfMode = perf; }
 
 bool EdgePass::formatNeedsBgraSwizzle(VkFormat swapFormat) {
-    return swapFormat == VK_FORMAT_B8G8R8A8_UNORM || swapFormat == VK_FORMAT_B8G8R8A8_SRGB;
+    // Direct-to-swapchain creates the storage VkImageView with swapFormat
+    // (e.g. VK_FORMAT_B8G8R8A8_UNORM), so Vulkan imageStore hardware already
+    // swizzles logical RGBA into BGRA bytes. Software .bgr swizzle would
+    // double-swizzle and swap Red and Blue.
+    (void)swapFormat;
+    return false;
 }
 
 bool EdgePass::canDirectToSwapchain(VkFormat swapFormat) const {
     if (!ctx || swapFormat == VK_FORMAT_UNDEFINED) return false;
     const bool rgba =
         swapFormat == VK_FORMAT_R8G8B8A8_UNORM || swapFormat == VK_FORMAT_R8G8B8A8_SRGB;
-    const bool bgra = formatNeedsBgraSwizzle(swapFormat);
+    const bool bgra =
+        swapFormat == VK_FORMAT_B8G8R8A8_UNORM || swapFormat == VK_FORMAT_B8G8R8A8_SRGB;
     if (!rgba && !bgra) return false;
     return formatSupportsStorage(ctx->physical, swapFormat);
 }

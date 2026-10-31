@@ -15,6 +15,7 @@ layout(local_size_x = 16, local_size_y = 16) in;
 layout(binding = 0) uniform EdgeParams {
     vec4 sizes; // renderW, renderH, displayW, displayH
     vec4 opts;  // sharpness, swizzleBgra, mode(0=quality 1=perf), scale
+    vec4 extra; // x = beautify (0=color-neutral, default; 1=contrast/vibrancy grade)
 } u;
 
 layout(binding = 1) uniform texture2D srcTex;
@@ -33,7 +34,9 @@ vec3 sampleLod(vec2 uv) {
 }
 
 // Beautify: gentle midtone contrast enhancement and natural vibrancy lift
+// Opt-in only (XFSR_EDGE_BEAUTIFY=1): default must match FSR1/NIS/blit colors.
 vec3 beautifyColor(vec3 c) {
+    if (u.extra.x < 0.5) return c;
     float y = luma(c);
     // Subtle S-curve to remove low-res washed-out haze and give crisp depth
     float sY = y + (y - 0.5) * (1.0 - abs(y - 0.5) * 2.0) * 0.08;

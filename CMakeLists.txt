@@ -8,6 +8,9 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_POLICY_DEFAULT_CMP0169 OLD)
+if(POLICY CMP0169)
+  cmake_policy(SET CMP0169 OLD)
+endif()
 
 option(XFSR_BUILD_DEMO "Build xfsr FSR3 demo (needs FidelityFX SDK libs)" ON)
 option(XFSR_BUILD_BENCH "Build xfsr_load_vk / xfsr_load_gl bench apps" ON)
@@ -174,6 +177,8 @@ add_library(xfsr_core STATIC
 add_dependencies(xfsr_core shaders)
 target_include_directories(xfsr_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+target_include_directories(xfsr_core SYSTEM PUBLIC
   ${vulkan_headers_SOURCE_DIR}/include
   ${volk_SOURCE_DIR}
   ${FFX_FSR_DIR}
@@ -181,7 +186,7 @@ target_include_directories(xfsr_core PUBLIC
 target_compile_definitions(xfsr_core PUBLIC
   VK_NO_PROTOTYPES
 )
-target_compile_options(xfsr_core PRIVATE -Wall -Wextra)
+target_compile_options(xfsr_core PRIVATE -Wall -Wextra -Wno-missing-field-initializers)
 target_link_libraries(xfsr_core PUBLIC ${CMAKE_DL_LIBS})
 
 if(XFSR_BUILD_DEMO AND XFSR_HAVE_FSR3_LIBS)
@@ -207,7 +212,7 @@ if(XFSR_BUILD_DEMO AND XFSR_HAVE_FSR3_LIBS)
     ${FFX_SDK_LIB_DIR}/libffx_fsr3upscaler_x64.a
     ${FFX_SDK_LIB_DIR}/libffx_backend_vk_x64.a
   )
-  target_compile_options(xfsr-demo PRIVATE ${GLFW3_CFLAGS_OTHER} -Wall -Wextra)
+  target_compile_options(xfsr-demo PRIVATE ${GLFW3_CFLAGS_OTHER} -Wall -Wextra -Wno-missing-field-initializers)
   set_source_files_properties(src/fsr3_pass.cpp PROPERTIES COMPILE_FLAGS "-fno-strict-aliasing")
 
   if(UNIX AND NOT APPLE)
@@ -225,9 +230,11 @@ add_library(xfsr_core_layer OBJECT
 )
 add_dependencies(xfsr_core_layer shaders)
 target_include_directories(xfsr_core_layer PRIVATE
-  ${vulkan_headers_SOURCE_DIR}/include
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${CMAKE_CURRENT_SOURCE_DIR}/layer
+)
+target_include_directories(xfsr_core_layer SYSTEM PRIVATE
+  ${vulkan_headers_SOURCE_DIR}/include
   ${volk_SOURCE_DIR}
   ${FFX_FSR_DIR}
 )
@@ -236,7 +243,7 @@ target_compile_definitions(xfsr_core_layer PRIVATE
   vkGetInstanceProcAddr=volk_vkGetInstanceProcAddr
   vkGetDeviceProcAddr=volk_vkGetDeviceProcAddr
 )
-target_compile_options(xfsr_core_layer PRIVATE -Wall -Wextra -fvisibility=hidden)
+target_compile_options(xfsr_core_layer PRIVATE -Wall -Wextra -Wno-missing-field-initializers -fvisibility=hidden)
 set_target_properties(xfsr_core_layer PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 add_library(VkLayer_XFSR SHARED
@@ -286,7 +293,7 @@ if(XFSR_BUILD_BENCH)
     ${volk_SOURCE_DIR}
   )
   target_compile_definitions(xfsr_load_vk PRIVATE VK_NO_PROTOTYPES)
-  target_compile_options(xfsr_load_vk PRIVATE ${GLFW3_CFLAGS_OTHER} -Wall -Wextra)
+  target_compile_options(xfsr_load_vk PRIVATE ${GLFW3_CFLAGS_OTHER} -Wall -Wextra -Wno-missing-field-initializers)
   target_link_libraries(xfsr_load_vk PRIVATE ${GLFW3_LIBRARIES} ${CMAKE_DL_LIBS})
 
   add_executable(xfsr_load_gl bench/xfsr_load_gl.cpp)

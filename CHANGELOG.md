@@ -5,6 +5,16 @@ All notable changes to **xfsr** / **xfsr-run** are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] — 2026-10-31
+
+### Fixed
+
+- **Edge upscaler colors**: edge output now matches FSR1 / NIS / blit.
+  - Direct-to-swapchain stores no longer double-swizzle BGRA swapchains (the storage view already uses the swapchain format), which swapped red and blue and gave a blue tint.
+  - The contrast S-curve and saturation boost ("beautify") is now opt-in with `XFSR_EDGE_BEAUTIFY=1`, so by default edge leaves colors unchanged.
+- **Freeze on quality/scale change with edge**: `FrameTransfer::resetPipeline` waits on its own slot fences (2 s timeout) instead of `vkDeviceWaitIdle` on the app device.
+- **`--preset` ignored at startup**: when caps-shrink is on, the app's swapchain size (e.g. CoD4 starting windowed at 1280x720 on a 1080p display) no longer overwrites the chosen preset/scale (it flipped `performance` to `quality`). Ratio-derived scale is only used with `XFSR_CAPS_SHRINK=0`.
+
 ## [0.7.0] — 2026-10-31
 
 ### Added
@@ -324,7 +334,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - Dual-GPU `SURFACE_LOST` / early `OUT_OF_DATE` (opaque app handle + iGPU-only window WSI)
 - Caps-shrink vs Zink EGL drawable mismatch
 
-[Unreleased]: https://github.com/jersobh/xfsr/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/jersobh/xfsr/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/jersobh/xfsr/releases/tag/v0.8.0
 [0.7.0]: https://github.com/jersobh/xfsr/releases/tag/v0.7.0
 [0.6.0]: https://github.com/jersobh/xfsr/releases/tag/v0.6.0
 [0.5.0]: https://github.com/jersobh/xfsr/releases/tag/v0.5.0
