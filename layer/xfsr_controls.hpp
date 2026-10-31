@@ -18,7 +18,7 @@ struct Snapshot {
     bool rcas = true;
     bool fsr = true;          // legacy: Upscaler::Fsr1 (F3 / XFSR_LAYER_FSR)
     Upscaler upscaler = Upscaler::Fsr1;
-    float edgeSharpness = 0.45f; // 0..1 — EdgePass CAS strength
+    float edgeSharpness = 0.60f; // 0..1 — EdgePass CAS strength
     bool edgePerf = false;       // EdgePass cheap path (edge-lite)
     bool offload = false;     // dual-GPU
     bool oneWay = true;       // prefer iGPU present when offload

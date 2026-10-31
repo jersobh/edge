@@ -33,6 +33,9 @@ typedef void (*GlViewportArrayvFn)(unsigned int, GLsizei, const float*);
 typedef void (*GlScissorArrayvFn)(unsigned int, GLsizei, const GLint*);
 typedef void (*GlViewportIndexedfFn)(unsigned int, float, float, float, float);
 typedef void (*GlScissorIndexedFn)(unsigned int, GLint, GLint, GLsizei, GLsizei);
+typedef void (*GlBlitFramebufferFn)(GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint,
+                                    unsigned int, unsigned int);
+typedef void (*GlGetIntegervFn)(unsigned int, GLint*);
 typedef void* (*GetProcFn)(const char*);
 
 static int g_dw, g_dh, g_rw, g_rh;
@@ -49,6 +52,8 @@ static GlViewportArrayvFn real_glViewportArrayv;
 static GlScissorArrayvFn real_glScissorArrayv;
 static GlViewportIndexedfFn real_glViewportIndexedf;
 static GlScissorIndexedFn real_glScissorIndexed;
+static GlBlitFramebufferFn real_glBlitFramebuffer;
+static GlGetIntegervFn real_glGetIntegerv;
 
 /* Forward decls — wrap_proc / dlsym return these. */
 XFSR_EXPORT void* glXGetProcAddress(const char* name);
@@ -392,19 +397,35 @@ XFSR_EXPORT void glScissorArrayv(unsigned int first, GLsizei count, const GLint*
     real_glScissorArrayv(first, count, v);
 }
 
-XFSR_EXPORT void glfwGetFramebufferSize(void* window, int* width, int* height) {
-    typedef void (*Fn)(void*, int*, int*);
-    static Fn real = NULL;
-    if (!real) real = (Fn)resolve_next("glfwGetFramebufferSize", (void*)glfwGetFramebufferSize);
-    if (!real) return;
-    real(window, width, height);
+XFSR_EXPORT void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
+                                   GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1,
+                                   unsigned int mask, unsigned int filter) {
+    if (!real_glBlitFramebuffer)
+        real_glBlitFramebuffer =
+            (GlBlitFramebufferFn)resolve_next("glBlitFramebuffer", (void*)glBlitFramebuffer);
+    if (!real_glBlitFramebuffer) return;
+    if (!real_glGetIntegerv)
+        real_glGetIntegerv = (GlGetIntegervFn)resolve_next("glGetIntegerv", NULL);
+    GLint drawFbo = 0;
+    if (real_glGetIntegerv) real_glGetIntegerv(0x8CA6 /* GL_DRAW_FRAMEBUFFER_BINDING */, &drawFbo);
+    if (drawFbo == 0 && dstX0 == 0 && dstY0 == 0 && dstX1 > 64 && dstY1 > 64) {
+        GLint x = 0, y = 0;
+        GLsizei w = dstX1, h = dstY1;
+        remap_rect(&x, &y, &w, &h);
+        if (w != dstX1 || h != dstY1) {
+            dstX1 = w;
+            dstY1 = h;
+            if (mask == 0x00004000u /* GL_COLOR_BUFFER_BIT */) filter = 0x2601u /* GL_LINEAR */;
+        }
+    }
+    real_glBlitFramebuffer(srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter);
+}
+
+static void remap_drawable_query(int* width, int* height) {
     if (!width || !height) return;
-    /* Always stash the real window fb size before lying. */
     g_fb_w = *width;
     g_fb_h = *height;
     load_extents();
-    /* Lie render size so apps that size from glfwGetFramebufferSize match the
-     * proxy color image. Prefer layer remap (X11 EGL often stays window-sized). */
     int lw = 0, lh = 0;
     if (layer_remap_size(&lw, &lh) && lw + 2 < g_fb_w && lh + 2 < g_fb_h) {
         *width = lw;
@@ -413,11 +434,40 @@ XFSR_EXPORT void glfwGetFramebufferSize(void* window, int* width, int* height) {
     }
     int dw = 0, dh = 0;
     if (!query_egl_drawable(&dw, &dh)) return;
-    if (abs(dw - g_fb_w) <= 2 && abs(dh - g_fb_h) <= 2) return; /* identity */
+    if (abs(dw - g_fb_w) <= 2 && abs(dh - g_fb_h) <= 2) return;
     if (dw + 2 < g_fb_w && dh + 2 < g_fb_h) {
         *width = dw;
         *height = dh;
     }
+}
+
+XFSR_EXPORT void glfwGetFramebufferSize(void* window, int* width, int* height) {
+    typedef void (*Fn)(void*, int*, int*);
+    static Fn real = NULL;
+    if (!real) real = (Fn)resolve_next("glfwGetFramebufferSize", (void*)glfwGetFramebufferSize);
+    if (!real) return;
+    real(window, width, height);
+    remap_drawable_query(width, height);
+}
+
+XFSR_EXPORT void SDL_GL_GetDrawableSize(void* window, int* width, int* height) {
+    typedef void (*Fn)(void*, int*, int*);
+    static Fn real = NULL;
+    if (!real) real = (Fn)resolve_next("SDL_GL_GetDrawableSize", (void*)SDL_GL_GetDrawableSize);
+    if (!real) return;
+    real(window, width, height);
+    remap_drawable_query(width, height);
+}
+
+XFSR_EXPORT int SDL_GetWindowSizeInPixels(void* window, int* width, int* height) {
+    typedef int (*Fn)(void*, int*, int*);
+    static Fn real = NULL;
+    if (!real)
+        real = (Fn)resolve_next("SDL_GetWindowSizeInPixels", (void*)SDL_GetWindowSizeInPixels);
+    if (!real) return -1;
+    int r = real(window, width, height);
+    remap_drawable_query(width, height);
+    return r;
 }
 
 XFSR_EXPORT void glfwGetWindowSize(void* window, int* width, int* height) {
@@ -515,7 +565,13 @@ static void* wrap_proc(const char* name, void* real) {
     if (strcmp(name, "glfwGetProcAddress") == 0) return (void*)glfwGetProcAddress;
     if (strcmp(name, "wl_egl_window_create") == 0) return (void*)wl_egl_window_create;
     if (strcmp(name, "wl_egl_window_resize") == 0) return (void*)wl_egl_window_resize;
+    if (strcmp(name, "SDL_GL_GetDrawableSize") == 0) return (void*)SDL_GL_GetDrawableSize;
+    if (strcmp(name, "SDL_GetWindowSizeInPixels") == 0) return (void*)SDL_GetWindowSizeInPixels;
     if (!real) return real;
+    if (strcmp(name, "glBlitFramebuffer") == 0) {
+        stash_if_real((void**)&real_glBlitFramebuffer, real, (void*)glBlitFramebuffer);
+        return (void*)glBlitFramebuffer;
+    }
     if (strcmp(name, "glViewport") == 0) {
         stash_if_real((void**)&real_glViewport, real, (void*)glViewport);
         return (void*)glViewport;

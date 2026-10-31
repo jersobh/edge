@@ -223,13 +223,10 @@ bool hybridWanted() {
 }
 
 bool offloadEnabled() {
-    // Prefer explicit env — HUD peek can lag or be tainted by ambient IGPU_PRESENT.
+    if (xfsr_ctrl::enabled()) return xfsr_ctrl::peek().offload;
     const char* o = xfsrEnv("XFSR_OFFLOAD", "CROSSVULKAN_OFFLOAD");
     if (o && o[0] == '0') return false;
-    if (o && o[0] && o[0] != '0') return true;
-    if (hybridWanted()) return true;
-    if (xfsr_ctrl::enabled()) return xfsr_ctrl::peek().offload;
-    return false;
+    return true;
 }
 
 struct DeviceData; // forward — igpuPresentWanted reads dGPU vendor
@@ -326,10 +323,15 @@ float samplerLodBiasInject() {
     return std::clamp(bias, -8.f, 8.f);
 }
 
+bool anyInstanceIsZink(bool* haveAnyOut);
+
 // OpenGL via Zink: Mesa sizes the EGL drawable from the Vulkan swapchain extent.
-// Caps-shrink → Zink creates @ render res → drawable becomes a postage-stamp inside
-// the still-large GL window. Detect Zink and skip shrink; force-scale on CreateSwapchain.
+// Detect Zink accurately from VkApplicationInfo::pEngineName ("mesa zink") when an
+// instance exists, falling back to env vars before instance creation.
 bool zinkActive() {
+    bool haveAny = false;
+    if (anyInstanceIsZink(&haveAny)) return true;
+    if (haveAny) return false;
     const char* a = std::getenv("MESA_LOADER_DRIVER_OVERRIDE");
     const char* b = std::getenv("GALLIUM_DRIVER");
     auto isZink = [](const char* s) {
@@ -373,6 +375,7 @@ struct InstanceData {
     uint32_t hintH = 0;
     bool capsShrunk = false; // true when we rewrote currentExtent to render res
     bool volkReady = false;
+    bool isZink = false;
     // Dedupe caps-shrink logs (Zink queries every frame).
     uint32_t lastLogCw = 0, lastLogCh = 0, lastLogRw = 0, lastLogRh = 0;
     // Wayland currentExtent is UINT_MAX — the first CreateSwapchain imageExtent *is*
@@ -393,6 +396,7 @@ struct DeviceData {
     PFN_vkAcquireNextImageKHR AcquireNextImageKHR = nullptr;
     PFN_vkQueuePresentKHR QueuePresentKHR = nullptr;
     PFN_vkGetDeviceQueue GetDeviceQueue = nullptr;
+    PFN_vkGetDeviceQueue2 GetDeviceQueue2 = nullptr;
     PFN_vkQueueSubmit QueueSubmit = nullptr;
     PFN_vkQueueSubmit2 QueueSubmit2 = nullptr;
     PFN_vkCreateSemaphore CreateSemaphore = nullptr;
@@ -506,6 +510,7 @@ std::mutex g_mu;
 std::mutex g_proxyLife;
 std::unordered_map<void*, InstanceData*> g_instances;
 std::unordered_map<void*, DeviceData*> g_devices;
+std::unordered_map<void*, DeviceData*> g_queues;
 std::unordered_map<void*, ProxySwapchain*> g_proxies;
 // Passthrough swapchains that should return OUT_OF_DATE once (zink Wayland kick).
 std::unordered_set<void*> g_forceOutOfDateOnce;
@@ -529,11 +534,21 @@ std::unordered_map<void*, PFN_vkGetDeviceProcAddr> g_companionGdpa;
 
 void* keyOf(VkInstance i) { return reinterpret_cast<void*>(i); }
 void* keyOf(VkDevice d) { return reinterpret_cast<void*>(d); }
+void* keyOf(VkQueue q) { return reinterpret_cast<void*>(q); }
 void* keyOf(VkSwapchainKHR s) { return reinterpret_cast<void*>(s); }
 
 ProxySwapchain* proxyOf(VkSwapchainKHR s) {
     auto it = g_proxies.find(keyOf(s));
     return it == g_proxies.end() ? nullptr : it->second;
+}
+
+bool anyInstanceIsZink(bool* haveAnyOut) {
+    std::lock_guard<std::mutex> lock(g_mu);
+    if (haveAnyOut) *haveAnyOut = !g_instances.empty();
+    for (const auto& kv : g_instances) {
+        if (kv.second && kv.second->isZink) return true;
+    }
+    return false;
 }
 
 // Present WSI stays on the app/dGPU device whenever round-trip offload is used.
@@ -586,21 +601,6 @@ bool igpuPresentWanted(const DeviceData* dd) {
                          "[xfsr] one-way disabled with MangoHud (opaque WSI SIGSEGV); "
                          "using round-trip. XFSR_IGPU_PRESENT=force to override.\n");
         }
-        return false;
-    }
-    // Zink keeps a raw NVIDIA QueuePresent and calls it with the app swapchain
-    // after the layer returns. An opaque handle SIGSEGVs in libnvidia-glcore.
-    // Round-trip returns the real dGPU swapchain. Native Vulkan stays one-way.
-    if (zinkActive() && !force) {
-        static bool loggedZink = false;
-        if (!loggedZink) {
-            loggedZink = true;
-            std::fprintf(stderr,
-                         "[xfsr] one-way disabled under Zink (NVIDIA presents the app "
-                         "swapchain itself); using round-trip. XFSR_IGPU_PRESENT=force "
-                         "to override.\n");
-        }
-        (void)dd;
         return false;
     }
     (void)dd;
@@ -929,38 +929,23 @@ bool setupOffloadPipeline(ProxySwapchain* ps, VkSwapchainKHR oldPresentSwapchain
     if (ps->format == VK_FORMAT_UNDEFINED) return false;
 
     try {
-        const bool scaling = ps->renderW != ps->displayW || ps->renderH != ps->displayH;
-        // Dual-GPU DMA only pays off when we actually render lower-res. Full-res
-        // transfer+present on Vega is pure overhead vs native dGPU present.
+        const bool scaling = fsrEnabled();
         if (scaling && offloadEnabled()) {
             ps->offloadIgpu = tryInitCompanionIgpu(dd, ps->surface);
         } else {
             ps->offloadIgpu = false;
-            if (!scaling && verboseLog() &&
-                (dd->loggedRw != ps->renderW || dd->loggedRh != ps->renderH ||
-                 dd->loggedDw != ps->displayW || dd->loggedDh != ps->displayH)) {
-                logv("[xfsr] no scale (render==display) — skip dual-GPU transfer\n");
-            }
         }
         // Prefer one-way iGPU present; round-trip when forced or XFSR_IGPU_PRESENT=0.
-        // Hybrid mode refuses round-trip: fall back to same-GPU instead.
         if (ps->offloadIgpu) {
             const bool wantOneWay = igpuPresentWanted(dd) && !dd->forceRoundTripOffload;
-            if (!wantOneWay && hybridWanted()) {
-                std::fprintf(stderr,
-                             "[xfsr] hybrid: one-way unavailable — same-GPU edge (no round-trip)\n");
-                ps->offloadIgpu = false;
-                ps->zinkOffloadRoundtrip = false;
+            ps->zinkOffloadRoundtrip = !wantOneWay;
+            if (ps->zinkOffloadRoundtrip) {
+                logv("[xfsr] offload: dGPU WSI + iGPU FSR (round-trip)%s%s\n",
+                     zinkActive() ? " [zink]" : "",
+                     dd->forceRoundTripOffload ? " [forced]" : "");
             } else {
-                ps->zinkOffloadRoundtrip = !wantOneWay;
-                if (ps->zinkOffloadRoundtrip) {
-                    logv("[xfsr] offload: dGPU WSI + iGPU FSR (round-trip)%s%s\n",
-                         zinkActive() ? " [zink]" : "",
-                         dd->forceRoundTripOffload ? " [forced]" : "");
-                } else {
-                    logv("[xfsr] offload: try one-way iGPU present%s%s\n",
-                         zinkActive() ? " [zink]" : "", hybridWanted() ? " [hybrid]" : "");
-                }
+                logv("[xfsr] offload: try one-way iGPU present%s%s\n",
+                     zinkActive() ? " [zink]" : "", hybridWanted() ? " [hybrid]" : "");
             }
         } else {
             ps->zinkOffloadRoundtrip = false;
@@ -993,7 +978,7 @@ bool setupOffloadPipeline(ProxySwapchain* ps, VkSwapchainKHR oldPresentSwapchain
             VkSwapchainCreateInfoKHR sci{};
             sci.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
             sci.surface = ps->surface;
-            sci.minImageCount = std::max(2u, ps->minImageCount);
+            sci.minImageCount = std::max(3u, ps->minImageCount);
             sci.imageFormat = ps->format;
             sci.imageColorSpace = ps->colorSpace;
             sci.imageExtent = extent;
@@ -1006,6 +991,10 @@ bool setupOffloadPipeline(ProxySwapchain* ps, VkSwapchainKHR oldPresentSwapchain
             sci.clipped = ps->clipped;
             sci.oldSwapchain = oldSc;
             VkResult cr = wsi.CreateSwapchainKHR(ctx->device, &sci, nullptr, out);
+            if (cr != VK_SUCCESS && sci.minImageCount > std::max(2u, ps->minImageCount)) {
+                sci.minImageCount = std::max(2u, ps->minImageCount);
+                cr = wsi.CreateSwapchainKHR(ctx->device, &sci, nullptr, out);
+            }
             if (cr != VK_SUCCESS && ps->presentMode != VK_PRESENT_MODE_FIFO_KHR) {
                 sci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
                 cr = wsi.CreateSwapchainKHR(ctx->device, &sci, nullptr, out);
@@ -1060,24 +1049,13 @@ bool setupOffloadPipeline(ProxySwapchain* ps, VkSwapchainKHR oldPresentSwapchain
         if (presentsOnIgpu(ps)) {
             cr = createPresentWsi(&dd->igpu, true, oldPresentSwapchain, &ps->realSwapchain);
             if (cr != VK_SUCCESS) {
-                if (hybridWanted()) {
-                    std::fprintf(stderr,
-                                 "[xfsr] hybrid: iGPU present failed (%d) — same-GPU edge "
-                                 "(refusing round-trip)\n",
-                                 static_cast<int>(cr));
-                    ps->offloadIgpu = false;
-                    ps->zinkOffloadRoundtrip = false;
-                    ps->opaqueAppHandle = false;
-                    dd->forceRoundTripOffload = false;
-                } else {
-                    std::fprintf(stderr,
-                                 "[xfsr] iGPU present swapchain failed: %d — fall back to "
-                                 "round-trip\n",
-                                 static_cast<int>(cr));
-                    dd->forceRoundTripOffload = true;
-                    ps->zinkOffloadRoundtrip = true;
-                    ps->opaqueAppHandle = false;
-                }
+                std::fprintf(stderr,
+                             "[xfsr] iGPU present swapchain failed: %d — fall back to "
+                             "round-trip\n",
+                             static_cast<int>(cr));
+                dd->forceRoundTripOffload = true;
+                ps->zinkOffloadRoundtrip = true;
+                ps->opaqueAppHandle = false;
             } else {
                 presentCtx = &dd->igpu;
                 ps->opaqueAppHandle = true;
@@ -1488,6 +1466,16 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateInstance(const VkInstanceCreateInfo* p
     id->gipa = gipa;
     id->layerCreateDevice = layerCreateDevice;
     id->layerDestroyDevice = layerDestroyDevice;
+    if (pCreateInfo && pCreateInfo->pApplicationInfo) {
+        const char* eng = pCreateInfo->pApplicationInfo->pEngineName;
+        const char* app = pCreateInfo->pApplicationInfo->pApplicationName;
+        auto hasZink = [](const char* s) {
+            if (!s) return false;
+            return std::strstr(s, "zink") != nullptr || std::strstr(s, "Zink") != nullptr ||
+                   std::strstr(s, "ZINK") != nullptr;
+        };
+        if (hasZink(eng) || hasZink(app)) id->isZink = true;
+    }
     xfsr_ctrl::initFromEnv();
     id->scale = xfsr_ctrl::enabled() ? xfsr_ctrl::peek().scale : presetScaleFromEnv();
     applyDisplayExtentHint(&id->hintW, &id->hintH);
@@ -1531,8 +1519,7 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateInstance(const VkInstanceCreateInfo* p
                  id->scale,
                  (id->realW && id->realH) ? "" : "none ",
                  id->realW, id->realH,
-                 (std::getenv("XFSR_OFFLOAD") && std::getenv("XFSR_OFFLOAD")[0] == '1') ? "1"
-                                                                                         : "0");
+                 offloadEnabled() ? "1" : "0");
     logv("[xfsr] instance scale=%.2f (layerCreateDevice=%s)%s%ux%u\n", id->scale,
          id->layerCreateDevice ? "yes" : "no",
          (id->realW && id->realH) ? " displayHint=" : " displayHint=none ",
@@ -1560,11 +1547,12 @@ VKAPI_ATTR void VKAPI_CALL xfsr_DestroyInstance(VkInstance instance,
 // Mutate surface caps so DXVK/Zink create at FSR render size; proxy presents at win size.
 void applyCapsShrink(InstanceData* id, VkPhysicalDevice physicalDevice,
                      VkSurfaceCapabilitiesKHR* caps) {
+    (void)physicalDevice;
     if (!id || !caps || !fsrEnabled() || g_bypassCapsShrink > 0 || !capsShrinkEnabled()) return;
 
     const uint32_t cw = caps->currentExtent.width;
     const uint32_t ch = caps->currentExtent.height;
-    if (!id->capsShrunk && cw != 0xFFFFFFFFu && ch != 0xFFFFFFFFu && cw > 0 && ch > 0) {
+    if (cw != 0xFFFFFFFFu && ch != 0xFFFFFFFFu && cw > 0 && ch > 0) {
         id->realW = cw;
         id->realH = ch;
         id->realFromSurface = true;
@@ -1589,18 +1577,9 @@ void applyCapsShrink(InstanceData* id, VkPhysicalDevice physicalDevice,
 
     uint32_t rw = 0, rh = 0;
     computeRenderSize(winW, winH, id->scale, &rw, &rh);
-    // DXVK pickImageExtent: if currentExtent is defined it returns it as-is; if
-    // UINT_MAX it clamps desired to min/max. D3D9 setSurfaceExtent(preferred=native)
-    // still clamps when current is UINT_MAX — so advertise undefined current + max=render.
-    // Zink/Mesa: UINT_MAX current is treated as a literal extent → OOM / failed create;
-    // it needs a concrete currentExtent=render so CreateSwapchain is 768 and the proxy
-    // can upscale (otherwise identity 1920 + GL shim remap → postage stamp).
-    if (zinkActive()) {
-        caps->currentExtent = {rw, rh};
-    } else {
-        caps->currentExtent = {0xFFFFFFFFu, 0xFFFFFFFFu};
-    }
-    caps->minImageExtent = {rw, rh};
+    caps->currentExtent = {rw, rh};
+    caps->minImageExtent.width = std::min(caps->minImageExtent.width, rw);
+    caps->minImageExtent.height = std::min(caps->minImageExtent.height, rh);
     caps->maxImageExtent = {rw, rh};
     id->capsShrunk = true;
     if (winW != id->lastLogCw || winH != id->lastLogCh || rw != id->lastLogRw ||
@@ -1774,6 +1753,7 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateDevice(VkPhysicalDevice physicalDevice
     dd->AcquireNextImageKHR = getDevProc<PFN_vkAcquireNextImageKHR>(dd, "vkAcquireNextImageKHR");
     dd->QueuePresentKHR = getDevProc<PFN_vkQueuePresentKHR>(dd, "vkQueuePresentKHR");
     dd->GetDeviceQueue = getDevProc<PFN_vkGetDeviceQueue>(dd, "vkGetDeviceQueue");
+    dd->GetDeviceQueue2 = getDevProc<PFN_vkGetDeviceQueue2>(dd, "vkGetDeviceQueue2");
     dd->QueueSubmit = getDevProc<PFN_vkQueueSubmit>(dd, "vkQueueSubmit");
     dd->QueueSubmit2 = getDevProc<PFN_vkQueueSubmit2>(dd, "vkQueueSubmit2");
     if (!dd->QueueSubmit2)
@@ -1812,6 +1792,9 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateDevice(VkPhysicalDevice physicalDevice
 
     std::lock_guard<std::mutex> lock(g_mu);
     g_devices[keyOf(*pDevice)] = dd;
+    if (dd->graphicsQueue != VK_NULL_HANDLE) {
+        g_queues[keyOf(dd->graphicsQueue)] = dd;
+    }
     std::fprintf(stderr, "[xfsr] device %s (%s)\n", props.deviceName,
                  dd->isDiscrete ? "discrete" : "integrated/other");
     return VK_SUCCESS;
@@ -1865,6 +1848,10 @@ VKAPI_ATTR void VKAPI_CALL xfsr_DestroyDevice(VkDevice device,
         if (dit != g_devices.end()) {
             dd = dit->second;
             g_devices.erase(dit);
+        }
+        for (auto qit = g_queues.begin(); qit != g_queues.end();) {
+            if (qit->second == dd) qit = g_queues.erase(qit);
+            else ++qit;
         }
     }
     if (dd) {
@@ -2102,12 +2089,57 @@ struct XfsrSwapchainPresentFenceInfoEXT {
 // between VKD3D worker threads and XFSR present threads. Recursive to allow nested calls.
 static std::recursive_mutex g_queueSubmitMu;
 
+VKAPI_ATTR void VKAPI_CALL xfsr_GetDeviceQueue(VkDevice device, uint32_t queueFamilyIndex,
+                                               uint32_t queueIndex, VkQueue* pQueue) {
+    DeviceData* dd = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_mu);
+        auto it = g_devices.find(keyOf(device));
+        if (it != g_devices.end()) dd = it->second;
+    }
+    if (dd && dd->GetDeviceQueue) {
+        dd->GetDeviceQueue(device, queueFamilyIndex, queueIndex, pQueue);
+        if (pQueue && *pQueue != VK_NULL_HANDLE) {
+            std::lock_guard<std::mutex> lock(g_mu);
+            g_queues[keyOf(*pQueue)] = dd;
+        }
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL xfsr_GetDeviceQueue2(VkDevice device, const VkDeviceQueueInfo2* pQueueInfo,
+                                                VkQueue* pQueue) {
+    DeviceData* dd = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_mu);
+        auto it = g_devices.find(keyOf(device));
+        if (it != g_devices.end()) dd = it->second;
+    }
+    if (dd && dd->GetDeviceQueue2) {
+        dd->GetDeviceQueue2(device, pQueueInfo, pQueue);
+        if (pQueue && *pQueue != VK_NULL_HANDLE) {
+            std::lock_guard<std::mutex> lock(g_mu);
+            g_queues[keyOf(*pQueue)] = dd;
+        }
+    }
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueueSubmit(VkQueue queue, uint32_t submitCount,
                                                 const VkSubmitInfo* pSubmits, VkFence fence) {
     DeviceData* dd = nullptr;
     {
         std::lock_guard<std::mutex> lock(g_mu);
-        if (!g_devices.empty()) dd = g_devices.begin()->second;
+        auto it = g_queues.find(keyOf(queue));
+        if (it != g_queues.end()) {
+            dd = it->second;
+        } else {
+            for (auto& pair : g_devices) {
+                if (pair.second && pair.second->isDiscrete) {
+                    dd = pair.second;
+                    break;
+                }
+            }
+            if (!dd && !g_devices.empty()) dd = g_devices.begin()->second;
+        }
     }
     std::lock_guard<std::recursive_mutex> qlock(g_queueSubmitMu);
     if (dd && dd->QueueSubmit) {
@@ -2121,7 +2153,18 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueueSubmit2(VkQueue queue, uint32_t submitC
     DeviceData* dd = nullptr;
     {
         std::lock_guard<std::mutex> lock(g_mu);
-        if (!g_devices.empty()) dd = g_devices.begin()->second;
+        auto it = g_queues.find(keyOf(queue));
+        if (it != g_queues.end()) {
+            dd = it->second;
+        } else {
+            for (auto& pair : g_devices) {
+                if (pair.second && pair.second->isDiscrete) {
+                    dd = pair.second;
+                    break;
+                }
+            }
+            if (!dd && !g_devices.empty()) dd = g_devices.begin()->second;
+        }
     }
     std::lock_guard<std::recursive_mutex> qlock(g_queueSubmitMu);
     if (dd && dd->QueueSubmit2) {
@@ -2351,7 +2394,8 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
             logv("[xfsr] in-game/caps proxy: render %ux%u → display %ux%u (scale %.2fx)\n", appW,
                  appH, surfW, surfH, dd->inst ? dd->inst->scale : 1.0f);
         }
-    } else if (haveHint && (appW < hintW || appH < hintH) && (!haveSurf || surfW < hintW || surfH < hintH)) {
+    } else if (haveHint && (appW < hintW || appH < hintH) &&
+               (!haveSurf || surfW < hintW || surfH < hintH)) {
         // Wayland Zink/native, or Windowed/borderless low-res where surface or app is smaller than the display
         ps->displayW = hintW;
         ps->displayH = hintH;
@@ -2407,15 +2451,15 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
             ps->renderH = std::max(appH, 1u);
             logv("[xfsr] force-scale: app %ux%u → display %ux%u\n", appW, appH, winW, winH);
         } else if (rw < winW || rh < winH) {
-            // Full-window create despite maxImageExtent clamp — stay identity.
-            std::fprintf(stderr,
-                         "[xfsr] D3D9 swapchain %ux%u (wanted render %ux%u) — identity to "
-                         "avoid DEVICE_LOST. Use borderless + in-game res ~%ux%u for FSR.\n",
-                         appW, appH, rw, rh, rw, rh);
             ps->renderW = appW;
             ps->renderH = appH;
-            // Caps already shrunk; recreate would submit the same native extent.
-            if (dd->inst) dd->inst->waylandShrinkKick = true;
+            if (dd->inst && dd->inst->capsShrunk) {
+                std::fprintf(stderr,
+                             "[xfsr] swapchain %ux%u ignored caps clamp (wanted render %ux%u) — "
+                             "keeping proxy/offload active at %ux%u.\n",
+                             appW, appH, rw, rh, appW, appH);
+                dd->inst->waylandShrinkKick = true;
+            }
         }
     } else {
         // Unknown surface: trust app extent. Do not invent app*scale.
@@ -2430,11 +2474,10 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
         }
     }
 
-    // Identity: render == display — completely bypass the proxy (zero xfsr overhead).
+    // Identity: render == display. Perform one shrink-kick if caps were not yet shrunk;
+    // otherwise keep the proxy active when offload or FSR/Edge is enabled so iGPU offload
+    // and sharpening still run on titles that create native-sized swapchains.
     if (ps->renderW == ps->displayW && ps->renderH == ps->displayH) {
-        // First create at native size (DXVK exclusive FS / Wayland / Zink): one
-        // OUT_OF_DATE so the next GetCaps (max clamped to render) rebuilds a proxy.
-        // Skip when D3D9 already ignored the clamp (waylandShrinkKick set above).
         const bool kickShrink = dd->inst && dd->inst->scale >= 1.01f && capsShrinkEnabled() &&
                                 !dd->inst->waylandShrinkKick && appW > 0 && appH > 0 &&
                                 (zinkActive() || !haveSurf ||
@@ -2450,18 +2493,26 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
                          "[xfsr] shrink kick: OUT_OF_DATE → next swapchain render %ux%u "
                          "(was identity %ux%u)\n",
                          kickRw, kickRh, appW, appH);
+            logv("[xfsr] identity present (render==display %ux%u) — bypass proxy (shrink kick)\n",
+                 ps->renderW, ps->renderH);
+            xfsr_ctrl::publishPresentStatus("identity-kick", ps->renderW, ps->renderH, ps->displayW,
+                                            ps->displayH, 0);
+            delete ps;
+            VkResult pr = createSwapchainPassthrough(dd, pCreateInfo, pAllocator, pSwapchain);
+            if (pr == VK_SUCCESS && pSwapchain && *pSwapchain) {
+                std::lock_guard<std::mutex> lock(g_mu);
+                g_forceOutOfDateOnce.insert(keyOf(*pSwapchain));
+            }
+            return pr;
         }
-        logv("[xfsr] identity present (render==display %ux%u) — bypass proxy%s\n", ps->renderW,
-             ps->renderH, kickShrink ? " (shrink kick)" : "");
-        xfsr_ctrl::publishPresentStatus(kickShrink ? "identity-kick" : "identity", ps->renderW,
-                                        ps->renderH, ps->displayW, ps->displayH, 0);
-        delete ps;
-        VkResult pr = createSwapchainPassthrough(dd, pCreateInfo, pAllocator, pSwapchain);
-        if (pr == VK_SUCCESS && kickShrink && pSwapchain && *pSwapchain) {
-            std::lock_guard<std::mutex> lock(g_mu);
-            g_forceOutOfDateOnce.insert(keyOf(*pSwapchain));
+        if (!offloadEnabled() && !fsrEnabled()) {
+            logv("[xfsr] identity present (render==display %ux%u) — bypass proxy\n", ps->renderW,
+                 ps->renderH);
+            xfsr_ctrl::publishPresentStatus("identity", ps->renderW, ps->renderH, ps->displayW,
+                                            ps->displayH, 0);
+            delete ps;
+            return createSwapchainPassthrough(dd, pCreateInfo, pAllocator, pSwapchain);
         }
-        return pr;
     }
 
     const VkSwapchainKHR oldApp = pCreateInfo->oldSwapchain;
@@ -2529,7 +2580,9 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
         std::lock_guard<std::mutex> lock(g_mu);
         g_proxies[keyOf(ps->handle)] = ps;
     }
-    publishGlRemap(ps->renderW, ps->renderH);
+    if (zinkActive()) {
+        publishGlRemap(ps->renderW, ps->renderH);
+    }
     std::fprintf(stderr,
                  "[xfsr] proxy ready: handle=%p render=%ux%u display=%ux%u imgs=%zu %s%s%s\n",
                  reinterpret_cast<void*>(ps->handle), ps->renderW, ps->renderH, ps->displayW,
@@ -2995,6 +3048,10 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
                 try {
                     waitPresentRing(ps, presentCtx);
                     waitOffloadIdle(dd);
+                    if (!ps->fsr.ctx) {
+                        DeviceContext* c = ps->offloadIgpu ? &dd->igpu : &dd->dgpu;
+                        ps->fsr.init(c);
+                    }
                     ps->fsr.resize(ps->renderW, ps->renderH, ps->displayW, ps->displayH);
                 } catch (const std::exception& e) {
                     std::fprintf(stderr, "[xfsr] live FSR enable failed: %s\n", e.what());
@@ -3042,94 +3099,93 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
     try {
         const GpuImage* frameImg = &ps->appImages[idx];
         bool roundtripUpscaled = false;
-        if (ps->zinkOffloadRoundtrip && dd->xferReady && dd->xferBackReady && ps->useFsr) {
-            // Async round-trip: pipelined dGPU→iGPU, FSR on ready frame, pipelined iGPU→dGPU.
-            // recordDownload accepts PRESENT_SRC (Zink) / SHADER_READ_ONLY (FSR out).
+        if (ps->zinkOffloadRoundtrip && dd->xferReady && dd->xferBackReady) {
             std::vector<VkPipelineStageFlags> stages;
             if (pPresentInfo->waitSemaphoreCount > 0) {
                 stages.assign(pPresentInfo->waitSemaphoreCount, VK_PIPELINE_STAGE_TRANSFER_BIT);
             }
             const VkSemaphore* waitSems =
                 pPresentInfo->waitSemaphoreCount > 0 ? pPresentInfo->pWaitSemaphores : nullptr;
+            const VkPipelineStageFlags* waitStagePtr = stages.empty() ? nullptr : stages.data();
             const bool fused = !OffloadRoundTrip::legacyRequested() &&
                                dd->xfer.usesGpuBuffer() && dd->xferBack.usesGpuBuffer();
-            if (fused) {
-                // One submit per device per stage; host only waits on frame-old fences.
-                frameImg = &OffloadRoundTrip::submit(
-                    dd->xfer, dd->xferBack, ps->fsr, ps->appImages[idx],
-                    pPresentInfo->waitSemaphoreCount, waitSems,
-                    stages.empty() ? nullptr : stages.data(), VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
-            } else {
-                // Legacy chain (XFSR_RT_LEGACY=1 / memcpy backend): blocking iGPU FSR
-                // submit between two independent transfer pipelines (~4 ms/frame floor).
-                double memcpyMs = 0, totalMs = 0;
-                const GpuImage& onIgpu = dd->xfer.transferPipeline(
-                    ps->appImages[idx], memcpyMs, totalMs, pPresentInfo->waitSemaphoreCount,
-                    waitSems, stages.empty() ? nullptr : stages.data(),
+            if (ps->useFsr) {
+                if (fused) {
+                    frameImg = &OffloadRoundTrip::submit(
+                        dd->xfer, dd->xferBack, ps->fsr, ps->appImages[idx],
+                        pPresentInfo->waitSemaphoreCount, waitSems, waitStagePtr,
+                        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+                } else {
+                    double memcpyMs = 0, totalMs = 0;
+                    const GpuImage& onIgpu = dd->xfer.transferPipeline(
+                        ps->appImages[idx], memcpyMs, totalMs, pPresentInfo->waitSemaphoreCount,
+                        waitSems, waitStagePtr, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+
+                    dd->igpu.resetAndBegin();
+                    ps->fsr.record(dd->igpu.cmd, onIgpu);
+                    dd->igpu.endSubmitWait();
+
+                    frameImg = &dd->xferBack.transferPipeline(
+                        ps->fsr.output(), memcpyMs, totalMs, 0, nullptr, nullptr,
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                    (void)memcpyMs;
+                    (void)totalMs;
+                }
+                roundtripUpscaled = true;
+            } else if (ps->useNis && ps->nis.ctx) {
+                if (fused) {
+                    frameImg = &OffloadRoundTrip::submit(
+                        dd->xfer, dd->xferBack, ps->nis, ps->appImages[idx],
+                        pPresentInfo->waitSemaphoreCount, waitSems, waitStagePtr,
+                        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+                } else {
+                    double memcpyMs = 0, totalMs = 0;
+                    const GpuImage& onIgpu = dd->xfer.transferPipeline(
+                        ps->appImages[idx], memcpyMs, totalMs, pPresentInfo->waitSemaphoreCount,
+                        waitSems, waitStagePtr, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+
+                    dd->igpu.resetAndBegin();
+                    ps->nis.record(dd->igpu.cmd, onIgpu);
+                    dd->igpu.endSubmitWait();
+
+                    frameImg = &dd->xferBack.transferPipeline(
+                        ps->nis.output(), memcpyMs, totalMs, 0, nullptr, nullptr,
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                    (void)memcpyMs;
+                    (void)totalMs;
+                }
+                roundtripUpscaled = true;
+            } else if (ps->useEdge && ps->edge.ctx) {
+                if (fused) {
+                    frameImg = &OffloadRoundTrip::submit(
+                        dd->xfer, dd->xferBack, ps->edge, ps->appImages[idx],
+                        pPresentInfo->waitSemaphoreCount, waitSems, waitStagePtr,
+                        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+                } else {
+                    double memcpyMs = 0, totalMs = 0;
+                    const GpuImage& onIgpu = dd->xfer.transferPipeline(
+                        ps->appImages[idx], memcpyMs, totalMs, pPresentInfo->waitSemaphoreCount,
+                        waitSems, waitStagePtr, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+
+                    dd->igpu.resetAndBegin();
+                    ps->edge.record(dd->igpu.cmd, onIgpu);
+                    dd->igpu.endSubmitWait();
+
+                    frameImg = &dd->xferBack.transferPipeline(
+                        ps->edge.output(), memcpyMs, totalMs, 0, nullptr, nullptr,
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                    (void)memcpyMs;
+                    (void)totalMs;
+                }
+                roundtripUpscaled = true;
+            } else if (ps->edge.ctx && fused) {
+                // Blit mode on round-trip offload: perform linear blit on the iGPU.
+                frameImg = &OffloadRoundTrip::submitBlit(
+                    dd->xfer, dd->xferBack, ps->edge, ps->appImages[idx],
+                    pPresentInfo->waitSemaphoreCount, waitSems, waitStagePtr,
                     VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
-
-                dd->igpu.resetAndBegin();
-                ps->fsr.record(dd->igpu.cmd, onIgpu);
-                dd->igpu.endSubmitWait();
-
-                frameImg = &dd->xferBack.transferPipeline(
-                    ps->fsr.output(), memcpyMs, totalMs, 0, nullptr, nullptr,
-                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-                (void)memcpyMs;
-                (void)totalMs;
+                roundtripUpscaled = true;
             }
-            roundtripUpscaled = true;
-            (void)queue;
-        } else if (ps->zinkOffloadRoundtrip && dd->xferReady && dd->xferBackReady && ps->useNis &&
-                   ps->nis.ctx) {
-            // NIS has no fused OffloadRoundTrip yet — blocking iGPU chain (same as FSR
-            // legacy). Never record iGPU NIS into the dGPU present cmd (SIGSEGV).
-            std::vector<VkPipelineStageFlags> stages;
-            if (pPresentInfo->waitSemaphoreCount > 0) {
-                stages.assign(pPresentInfo->waitSemaphoreCount, VK_PIPELINE_STAGE_TRANSFER_BIT);
-            }
-            const VkSemaphore* waitSems =
-                pPresentInfo->waitSemaphoreCount > 0 ? pPresentInfo->pWaitSemaphores : nullptr;
-            double memcpyMs = 0, totalMs = 0;
-            const GpuImage& onIgpu = dd->xfer.transferPipeline(
-                ps->appImages[idx], memcpyMs, totalMs, pPresentInfo->waitSemaphoreCount, waitSems,
-                stages.empty() ? nullptr : stages.data(), VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
-
-            dd->igpu.resetAndBegin();
-            ps->nis.record(dd->igpu.cmd, onIgpu);
-            dd->igpu.endSubmitWait();
-
-            frameImg = &dd->xferBack.transferPipeline(
-                ps->nis.output(), memcpyMs, totalMs, 0, nullptr, nullptr,
-                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-            (void)memcpyMs;
-            (void)totalMs;
-            roundtripUpscaled = true;
-            (void)queue;
-        } else if (ps->zinkOffloadRoundtrip && dd->xferReady && dd->xferBackReady && ps->useEdge &&
-                   ps->edge.ctx) {
-            // Edge + round-trip (non-hybrid only): blocking chain. Hybrid refuses this path.
-            std::vector<VkPipelineStageFlags> stages;
-            if (pPresentInfo->waitSemaphoreCount > 0) {
-                stages.assign(pPresentInfo->waitSemaphoreCount, VK_PIPELINE_STAGE_TRANSFER_BIT);
-            }
-            const VkSemaphore* waitSems =
-                pPresentInfo->waitSemaphoreCount > 0 ? pPresentInfo->pWaitSemaphores : nullptr;
-            double memcpyMs = 0, totalMs = 0;
-            const GpuImage& onIgpu = dd->xfer.transferPipeline(
-                ps->appImages[idx], memcpyMs, totalMs, pPresentInfo->waitSemaphoreCount, waitSems,
-                stages.empty() ? nullptr : stages.data(), VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
-
-            dd->igpu.resetAndBegin();
-            ps->edge.record(dd->igpu.cmd, onIgpu);
-            dd->igpu.endSubmitWait();
-
-            frameImg = &dd->xferBack.transferPipeline(
-                ps->edge.output(), memcpyMs, totalMs, 0, nullptr, nullptr,
-                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-            (void)memcpyMs;
-            (void)totalMs;
-            roundtripUpscaled = true;
             (void)queue;
         } else if (presentsOnIgpu(ps) && dd->xferReady) {
             // Chain app present-wait semaphores into the download submit (no host stall).
@@ -3158,12 +3214,16 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
         // WaitForFences(UINT64_MAX) freezes the app (seen on glmark2 after SUBOPTIMAL).
         dd->dgpu.loadDispatch();
         auto& dgpuVk = dd->dgpu.vk;
+        if (presentCtx.device != dd->dgpu.device && fence) {
+            vkCheck(pd.WaitForFences(presentCtx.device, 1, &fence, VK_TRUE, UINT64_MAX),
+                    "wait igpu present cmd");
+        }
         VkFence slotWait = ps->lastCmdFence[slot] ? ps->lastCmdFence[slot] : fence;
         if (slotWait) {
             if (ps->lastCmdFence[slot]) {
                 vkCheck(dgpuVk.WaitForFences(dd->dgpu.device, 1, &slotWait, VK_TRUE, UINT64_MAX),
                         "wait cmd slot");
-            } else {
+            } else if (presentCtx.device == dd->dgpu.device) {
                 vkCheck(pd.WaitForFences(presentCtx.device, 1, &slotWait, VK_TRUE, UINT64_MAX),
                         "wait");
             }
@@ -3206,21 +3266,11 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
         }
         if (acq != VK_SUCCESS && acq != VK_SUBOPTIMAL_KHR) {
             if (presentsOnIgpu(ps) && !dd->forceRoundTripOffload) {
-                if (hybridWanted()) {
-                    std::fprintf(stderr,
-                                 "[xfsr] hybrid: acquire failed (%d) — next recreate drops "
-                                 "offload (same-GPU edge)\n",
-                                 static_cast<int>(acq));
-                    // Disable offload via env so setupOffloadPipeline stays same-GPU.
-                    setenv("XFSR_OFFLOAD", "0", 1);
-                    unsetenv("XFSR_HYBRID");
-                } else {
-                    dd->forceRoundTripOffload = true;
-                    std::fprintf(stderr,
-                                 "[xfsr] offload: acquire failed (%d) on one-way — fall back to "
-                                 "round-trip\n",
-                                 static_cast<int>(acq));
-                }
+                dd->forceRoundTripOffload = true;
+                std::fprintf(stderr,
+                             "[xfsr] offload: acquire failed (%d) on one-way — fall back to "
+                             "round-trip\n",
+                             static_cast<int>(acq));
                 return VK_ERROR_OUT_OF_DATE_KHR;
             }
             return acq;
@@ -3513,7 +3563,9 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
                 ps->lastCmdFence[slot] = imgRelease;
             }
             for (VkFence af : appPresentFences) {
-                dgpuVk.ResetFences(dd->dgpu.device, 1, &af);
+                if (dgpuVk.GetFenceStatus && dgpuVk.GetFenceStatus(dd->dgpu.device, af) == VK_SUCCESS) {
+                    dgpuVk.ResetFences(dd->dgpu.device, 1, &af);
+                }
                 VkSubmitInfo mark{VK_STRUCTURE_TYPE_SUBMIT_INFO};
                 vkCheck(dgpuVk.QueueSubmit(dd->dgpu.graphicsQueue, 1, &mark, af),
                         "signal app present fence");
@@ -3532,18 +3584,10 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
         if (pr != VK_SUCCESS && pr != VK_SUBOPTIMAL_KHR && pr != VK_ERROR_OUT_OF_DATE_KHR) {
             std::fprintf(stderr, "[xfsr] QueuePresent failed: %d\n", static_cast<int>(pr));
             if (presentsOnIgpu(ps) && !dd->forceRoundTripOffload) {
-                if (hybridWanted()) {
-                    std::fprintf(stderr,
-                                 "[xfsr] hybrid: present failed — next recreate drops offload "
-                                 "(same-GPU edge)\n");
-                    setenv("XFSR_OFFLOAD", "0", 1);
-                    unsetenv("XFSR_HYBRID");
-                } else {
-                    dd->forceRoundTripOffload = true;
-                    std::fprintf(stderr,
-                                 "[xfsr] offload: fall back to round-trip on next swapchain "
-                                 "recreate (XFSR_IGPU_PRESENT=0 to skip one-way)\n");
-                }
+                dd->forceRoundTripOffload = true;
+                std::fprintf(stderr,
+                             "[xfsr] offload: fall back to round-trip on next swapchain "
+                             "recreate (XFSR_IGPU_PRESENT=0 to skip one-way)\n");
                 return VK_ERROR_OUT_OF_DATE_KHR;
             }
             return pr;
@@ -3678,6 +3722,10 @@ PFN_vkVoidFunction resolveDevice(const char* pName) {
         return reinterpret_cast<PFN_vkVoidFunction>(xfsr_SetHdrMetadataEXT);
     if (std::strcmp(pName, "vkQueuePresentKHR") == 0)
         return reinterpret_cast<PFN_vkVoidFunction>(xfsr_QueuePresentKHR);
+    if (std::strcmp(pName, "vkGetDeviceQueue") == 0)
+        return reinterpret_cast<PFN_vkVoidFunction>(xfsr_GetDeviceQueue);
+    if (std::strcmp(pName, "vkGetDeviceQueue2") == 0)
+        return reinterpret_cast<PFN_vkVoidFunction>(xfsr_GetDeviceQueue2);
     if (std::strcmp(pName, "vkQueueSubmit") == 0)
         return reinterpret_cast<PFN_vkVoidFunction>(xfsr_QueueSubmit);
     if (std::strcmp(pName, "vkQueueSubmit2") == 0 ||

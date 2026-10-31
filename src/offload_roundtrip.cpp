@@ -45,18 +45,19 @@ bool OffloadRoundTrip::legacyRequested() {
     return legacy;
 }
 
-const GpuImage& OffloadRoundTrip::submit(FrameTransfer& fwd, FrameTransfer& back, FsrPass& fsr,
-                                         const GpuImage& appImage, uint32_t waitSemCount,
-                                         const VkSemaphore* waitSems,
-                                         const VkPipelineStageFlags* waitStages,
-                                         VkImageLayout appLayout) {
+const GpuImage& OffloadRoundTrip::submitCustom(FrameTransfer& fwd, FrameTransfer& back,
+                                               RecordFn recordFn, void* user,
+                                               const GpuImage& appImage, uint32_t waitSemCount,
+                                               const VkSemaphore* waitSems,
+                                               const VkPipelineStageFlags* waitStages,
+                                               VkImageLayout appLayout) {
     constexpr int S = FrameTransfer::kSlots;
     DeviceContext* dg = fwd.srcCtx; // app / present GPU
     DeviceContext* ig = fwd.dstCtx; // FSR GPU
     dg->loadDispatch();
     ig->loadDispatch();
 
-    // B — iGPU: one fused submit (upload → EASU/RCAS → download). No host wait after.
+    // B — iGPU: one fused submit (upload → upscale → download). No host wait after.
     auto stageB = [&](int j) {
         FrameTransfer::Slot& fs = fwd.slots[j];
         FrameTransfer::Slot& bs = back.slots[j];
@@ -67,8 +68,8 @@ const GpuImage& OffloadRoundTrip::submit(FrameTransfer& fwd, FrameTransfer& back
         resetFence(ig, bs.srcFence, "rt B reset");
         beginOneShot(ig, bs.srcCmd);
         fwd.recordUpload(bs.srcCmd, j);
-        fsr.record(bs.srcCmd, fs.dstOptimal);
-        back.recordDownload(bs.srcCmd, fsr.output(), j, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        const GpuImage& upOut = recordFn(user, bs.srcCmd, fs.dstOptimal);
+        back.recordDownload(bs.srcCmd, upOut, j, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         endSubmit(ig, bs.srcCmd, bs.srcFence, "rt B submit");
         fs.pendingUpload = false;
         bs.pendingUpload = true;
@@ -120,4 +121,86 @@ const GpuImage& OffloadRoundTrip::submit(FrameTransfer& fwd, FrameTransfer& back
     fwd.produceIndex = (k + 1) % S;
     if (fwd.framesProduced < (1 << 30)) ++fwd.framesProduced;
     return back.slots[back.roundTripReady].dstOptimal;
+}
+
+const GpuImage& OffloadRoundTrip::submit(FrameTransfer& fwd, FrameTransfer& back, FsrPass& fsr,
+                                         const GpuImage& appImage, uint32_t waitSemCount,
+                                         const VkSemaphore* waitSems,
+                                         const VkPipelineStageFlags* waitStages,
+                                         VkImageLayout appLayout) {
+    auto fn = [](void* u, VkCommandBuffer cmd, const GpuImage& src) -> const GpuImage& {
+        auto* p = static_cast<FsrPass*>(u);
+        p->record(cmd, src);
+        return p->output();
+    };
+    return submitCustom(fwd, back, fn, &fsr, appImage, waitSemCount, waitSems, waitStages,
+                        appLayout);
+}
+
+const GpuImage& OffloadRoundTrip::submit(FrameTransfer& fwd, FrameTransfer& back, EdgePass& edge,
+                                         const GpuImage& appImage, uint32_t waitSemCount,
+                                         const VkSemaphore* waitSems,
+                                         const VkPipelineStageFlags* waitStages,
+                                         VkImageLayout appLayout) {
+    auto fn = [](void* u, VkCommandBuffer cmd, const GpuImage& src) -> const GpuImage& {
+        auto* p = static_cast<EdgePass*>(u);
+        p->record(cmd, src);
+        return p->output();
+    };
+    return submitCustom(fwd, back, fn, &edge, appImage, waitSemCount, waitSems, waitStages,
+                        appLayout);
+}
+
+const GpuImage& OffloadRoundTrip::submit(FrameTransfer& fwd, FrameTransfer& back, NisPass& nis,
+                                         const GpuImage& appImage, uint32_t waitSemCount,
+                                         const VkSemaphore* waitSems,
+                                         const VkPipelineStageFlags* waitStages,
+                                         VkImageLayout appLayout) {
+    auto fn = [](void* u, VkCommandBuffer cmd, const GpuImage& src) -> const GpuImage& {
+        auto* p = static_cast<NisPass*>(u);
+        p->record(cmd, src);
+        return p->output();
+    };
+    return submitCustom(fwd, back, fn, &nis, appImage, waitSemCount, waitSems, waitStages,
+                        appLayout);
+}
+
+const GpuImage& OffloadRoundTrip::submitBlit(FrameTransfer& fwd, FrameTransfer& back,
+                                             EdgePass& edgeScratch, const GpuImage& appImage,
+                                             uint32_t waitSemCount, const VkSemaphore* waitSems,
+                                             const VkPipelineStageFlags* waitStages,
+                                             VkImageLayout appLayout) {
+    auto fn = [](void* u, VkCommandBuffer cmd, const GpuImage& src) -> const GpuImage& {
+        auto* p = static_cast<EdgePass*>(u);
+        const int slot = p->writeOut % EdgePass::kOutRing;
+        p->readyOut = slot;
+        p->writeOut = (slot + 1) % EdgePass::kOutRing;
+        const GpuImage& dst = p->out[slot];
+        DeviceContext* ctx = p->ctx;
+        transitionImage(ctx, cmd, src.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_READ_BIT,
+                        VK_ACCESS_TRANSFER_READ_BIT);
+        transitionImage(ctx, cmd, dst.image, VK_IMAGE_LAYOUT_UNDEFINED,
+                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, VK_ACCESS_TRANSFER_WRITE_BIT);
+        VkImageBlit blit{};
+        blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        blit.srcOffsets[0] = {0, 0, 0};
+        blit.srcOffsets[1] = {static_cast<int32_t>(src.width), static_cast<int32_t>(src.height), 1};
+        blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        blit.dstOffsets[0] = {0, 0, 0};
+        blit.dstOffsets[1] = {static_cast<int32_t>(dst.width), static_cast<int32_t>(dst.height), 1};
+        ctx->vk.CmdBlitImage(cmd, src.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst.image,
+                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
+        transitionImage(ctx, cmd, dst.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_TRANSFER_WRITE_BIT,
+                        VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_SHADER_READ_BIT);
+        return dst;
+    };
+    return submitCustom(fwd, back, fn, &edgeScratch, appImage, waitSemCount, waitSems, waitStages,
+                        appLayout);
 }

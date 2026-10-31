@@ -132,6 +132,11 @@ constexpr int kPresetCount = 4;
 const char* kPresetNames[kPresetCount] = {"quality", "balanced", "performance", "ultra"};
 constexpr float kPresetScales[kPresetCount] = {1.5f, 1.7f, 2.0f, 2.5f};
 
+inline const char* presetLabel(float scale, int idx) {
+    if (scale < 1.35f) return "in-game";
+    return kPresetNames[idx];
+}
+
 // X11 keysyms (avoid X11 headers — dlopen only).
 constexpr unsigned long kXK_F1 = 0xffbe;
 constexpr unsigned long kXK_F2 = 0xffbf;
@@ -156,8 +161,8 @@ struct Runtime {
     float scale = 1.5f;
     bool rcas = true;
     Upscaler upscaler = Upscaler::Fsr1;
-    float edgeSharpness = 0.45f;
-    bool edgePerf = true;
+    float edgeSharpness = 0.60f;
+    bool edgePerf = false;
     bool offload = false;
     bool oneWay = true;
     bool oneWayForce = false;
@@ -429,7 +434,7 @@ void formatStatusLocked(char* out, size_t n) {
         } else {
             std::snprintf(out, n,
                           "xfsr %s %.2fx edge %s sharp:%.2f off:%s 1way:%s\nFPS %.0f  CPU %s",
-                          kPresetNames[g_rt.presetIdx], g_rt.scale,
+                          presetLabel(g_rt.scale, g_rt.presetIdx), g_rt.scale,
                           g_rt.edgePerf ? "perf" : "hq", g_rt.edgeSharpness,
                           g_rt.offload ? "on" : "off", g_rt.oneWay ? "on" : "off", g_metrics.fps,
                           cpu);
@@ -441,7 +446,7 @@ void formatStatusLocked(char* out, size_t n) {
                       g_metrics.fps, cpu);
     } else {
         std::snprintf(out, n, "xfsr %s %.2fx %s RCAS:%s off:%s 1way:%s\nFPS %.0f  CPU %s",
-                      kPresetNames[g_rt.presetIdx], g_rt.scale, upscalerName(g_rt.upscaler),
+                      presetLabel(g_rt.scale, g_rt.presetIdx), g_rt.scale, upscalerName(g_rt.upscaler),
                       g_rt.rcas ? "on" : "off", g_rt.offload ? "on" : "off",
                       g_rt.oneWay ? "on" : "off", g_metrics.fps, cpu);
     }
@@ -1131,7 +1136,7 @@ void publishPresentStatus(const char* mode, uint32_t renderW, uint32_t renderH,
                  "mode=%s\nrender=%ux%u\ndisplay=%ux%u\npresents=%u\nscale=%.3f\npreset=%s\n"
                  "upscaler=%s\nadaptive=%d\ntarget_fps=%.1f\nema_ft_ms=%.2f\n",
                  mode && mode[0] ? mode : "unknown", renderW, renderH, displayW, displayH, presents,
-                 g_rt.scale, kPresetNames[g_rt.presetIdx], upscalerName(g_rt.upscaler),
+                 g_rt.scale, presetLabel(g_rt.scale, g_rt.presetIdx), upscalerName(g_rt.upscaler),
                  g_rt.adaptive ? 1 : 0, g_rt.targetFps, g_rt.haveEma ? g_rt.emaFtMs : 0.f);
     std::fclose(f);
 }
@@ -1231,9 +1236,9 @@ void initFromEnv() {
 
     const char* off = std::getenv("XFSR_OFFLOAD");
     if (!off) off = std::getenv("CROSSVULKAN_OFFLOAD");
-    // Explicit XFSR_OFFLOAD=0 wins — never let IGPU_PRESENT=force turn offload back on.
+    // Default ON (offload to iGPU); explicit XFSR_OFFLOAD=0 disables.
     const bool offloadExplicitOff = off && off[0] == '0';
-    g_rt.offload = (off && off[0] && off[0] != '0');
+    g_rt.offload = !offloadExplicitOff;
 
     const char* ow = std::getenv("XFSR_IGPU_PRESENT");
     if (!ow) ow = std::getenv("CROSSVULKAN_IGPU_PRESENT");
@@ -1453,22 +1458,22 @@ bool recordOverlay(OverlayGpu* ov, DeviceContext* ctx, VkCommandBuffer cmd, VkIm
         rasterizeText(pixels.data(), ov->width, ov->height, text);
         std::memcpy(ov->stagingMapped, pixels.data(), pixels.size());
         std::snprintf(ov->lastText, sizeof(ov->lastText), "%s", text);
+
+        transition(ctx, cmd, ov->image.image, VK_IMAGE_LAYOUT_UNDEFINED,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                   VK_PIPELINE_STAGE_TRANSFER_BIT, 0, VK_ACCESS_TRANSFER_WRITE_BIT);
+
+        VkBufferImageCopy copy{};
+        copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        copy.imageExtent = {ov->width, ov->height, 1};
+        d.CmdCopyBufferToImage(cmd, ov->staging, ov->image.image,
+                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+
+        transition(ctx, cmd, ov->image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                   VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                   VK_ACCESS_TRANSFER_READ_BIT);
     }
-
-    transition(ctx, cmd, ov->image.image, VK_IMAGE_LAYOUT_UNDEFINED,
-               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-               VK_PIPELINE_STAGE_TRANSFER_BIT, 0, VK_ACCESS_TRANSFER_WRITE_BIT);
-
-    VkBufferImageCopy copy{};
-    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    copy.imageExtent = {ov->width, ov->height, 1};
-    d.CmdCopyBufferToImage(cmd, ov->staging, ov->image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                           1, &copy);
-
-    transition(ctx, cmd, ov->image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_TRANSFER_BIT,
-               VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
-               VK_ACCESS_TRANSFER_READ_BIT);
 
     // Bottom-left — top is usually MangoHud.
     const int32_t margin = 12;

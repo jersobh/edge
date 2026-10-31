@@ -31,14 +31,14 @@ float parseFloat01(const char* e) {
 }
 
 bool parsePerfModeEnv(const char* e) {
-    if (!e || !e[0]) return true;
+    if (!e || !e[0]) return false;
     if (e[0] == '1') return true;
     if (std::strcmp(e, "perf") == 0 || std::strcmp(e, "lite") == 0 ||
         std::strcmp(e, "edge-lite") == 0 || std::strcmp(e, "edge_lite") == 0)
         return true;
     if (e[0] == '0' || std::strcmp(e, "quality") == 0 || std::strcmp(e, "hq") == 0)
         return false;
-    return true;
+    return false;
 }
 
 void createMappedUbo(DeviceContext* ctx, VkBuffer* buf, VkDeviceMemory* mem, void** mapped) {
@@ -220,7 +220,8 @@ void EdgePass::resize(uint32_t rw, uint32_t rh, uint32_t dw, uint32_t dh) {
     displayH = dh;
     writeOut = readyOut = 0;
     const VkImageUsageFlags usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
-                                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+                                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                                    VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     for (int i = 0; i < kOutRing; ++i) {
         out[i].destroy();
         out[i] = createImage(ctx, displayW, displayH, outputFormat, usage,

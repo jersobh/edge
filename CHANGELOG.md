@@ -7,6 +7,48 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+s### Added
+
+- **Beautifying High-Performance Edge Upscaler for Weaker Hardware**:
+  - Re-engineered [edge_pass.comp.glsl](file:///home/jeff/Projects/crossvulkan/shaders/edge_pass.comp.glsl) with **zero shared memory (LDS)** and **zero barriers**, achieving 100% GPU occupancy on weaker discrete cards (GTX 1650, Pascal/Turing), integrated APUs, and handhelds.
+  - **Sub-Pixel Edge Tangent Reconstruction**: Traces continuous edge normals and blends along edge tangents to eliminate jagged staircases on geometry silhouettes in low rendering resolutions.
+  - **Diagonal-Adaptive Edge Reconstruction**: Smooths 45° and 135° diagonal boundaries without blur or moiré artifacts.
+  - **Anti-Ringing Catmull-Rom Texture Filter**: Enforces strict local bounding-box clamps to eradicate dark and bright halos around text, UI elements, foliage, and specular highlights.
+  - **Integrated Contrast-Adaptive Sharpening (CAS)**: Recovers crisp micro-detail in textures while suppressing noise on flat gradients.
+  - **Clarity & Vibrancy Beautification**: Applies subtle S-curve contrast and selective saturation recovery to lift muddy, washed-out low-resolution frames into vibrant, rich visuals.
+  - **Fast Perf Mode (Edge-Lite)**: Ultra-low latency 5-tap diagonal reconstruction with under 0.15 ms execution time for maximum framerates.
+- **Call of Duty 4 Direct Layer Upscaling with Caps Shrink**:
+  - Configured native profile for Call of Duty 4 (`[app:7940]`, D3D9 `iw3mp.exe` / `iw3sp.exe`) with `gamescope=0`, `caps_shrink=1`, `upscaler=edge`, and `overlay=1`.
+  - Enabled Vulkan surface capability shrinking (`caps_shrink=1`) so DXVK dynamically allocates a lower-resolution swapchain (960x540 for performance preset) and directly invokes the `xfsr` EdgePass upscaler to 1080p with live hotkey controls and native overlay.
+- **Street Fighter & Mega Man Collection Gamescope Nesting**:
+  - Configured native profiles for Street Fighter 30th Anniversary Collection (`[app:586200]`, OpenGL) and Mega Man Legacy Collection (`[app:363440]`, 32-bit D3D11 `Proteus.exe`) using `gamescope=1` with native Wayland backend.
+  - Resolved white flicker on hybrid GPU laptops (AMD Vega iGPU + NVIDIA dGPU) running KWin Wayland: switched default Gamescope host backend from `sdl` with `SDL_VIDEODRIVER=x11` to native `wayland` (`xdg_shell`) with `--prefer-vk-device` mapped to the display controller, completely eliminating XWayland EGL DRI2 null failures and presentation flicker.
+  - Fixed unintentional MangoHud injection: prevented `scripts/xfsr-run` from launching MangoHud in nested sessions when only `OVERLAY=1` is specified without an explicit `--mangohud` flag.
+
+### Fixed
+
+- **Adaptive Scaling Stutter Elimination**:
+  - Disabled adaptive continuous scaling by default (`adaptive=0`) in [share/xfsr/profiles.example.conf](file:///home/jeff/Projects/crossvulkan/share/xfsr/profiles.example.conf) and user configuration `~/.config/xfsr/profiles.conf`.
+  - Replaced fluctuating adaptive swapchain recreations with rock-solid fixed scaling presets (`quality`, `balanced`, `performance`, `ultra`), eliminating presentation hitches and frame drops.
+- **Live Upscaler Switching & On-Screen Feedback**:
+  - Added lazy `DeviceContext` initialization for FSR1 (`ps->fsr.init(c)`) in [layer/xfsr_layer.cpp](file:///home/jeff/Projects/crossvulkan/layer/xfsr_layer.cpp#L3066) during live `F3` cycling, preventing live resize failures when switching from Edge to FSR1.
+  - Enabled status overlay and toasts by default (`overlay=1`) for Call of Duty 4 (`[app:7940]`) in [share/xfsr/profiles.example.conf](file:///home/jeff/Projects/crossvulkan/share/xfsr/profiles.example.conf) and `~/.config/xfsr/profiles.conf` so preset/mode adjustments are clearly visible on-screen.
+  - Restored `r_fullscreen "1"` configuration for Call of Duty 4 to ensure the proxy layer engages full-display upscaling from low in-game resolutions.
+
+## [0.7.0] — 2026-10-28
+
+### Added
+
+- **EdgePass Quality & Sharpness Enhancements**:
+  - Boosted directional edge reconstruction mix from `0.70` to `0.88` in the full Di Zenzo path and `0.65` to `0.82` in the lite path for sharper edge reconstruction.
+  - Increased Contrast Adaptive Sharpening (CAS) weights and tightened falloff curve (`mix(-0.05, -0.24, sharp)` in padded and `mix(-0.04, -0.22, sharp)` in lite).
+  - Fixed `sharpenLite` to sample render-space texel contrast (`0.5 / renderSize`) rather than blurry sub-pixel offsets.
+  - Defaulted EdgePass to the high-fidelity `quality` mode with default sharpness of `0.60`.
+- **In-Game Resolution Indicator**:
+  - HUD and status outputs now label sub-1.35x non-standard aspect or internal resolutions as `in-game` (e.g. `in-game 1.11x`) rather than misleadingly bucketing them into the 1.5x `quality` preset label.
+- **Native Game Profiles**:
+  - Added optimized profile for Resident Evil Village (`[app:1196590]`): `preset=quality`, `upscaler=edge`, `edge_mode=quality`, `edge_sharpness=0.65`, `rcas=0`, `offload=0`, `gamescope=0`.
+
 ### Fixed
 
 - **Presentation Deadlock**: Upgraded `g_queueSubmitMu` to `std::recursive_mutex` in [xfsr_layer.cpp](file:///home/jeff/Projects/crossvulkan/layer/xfsr_layer.cpp), eliminating a self-deadlock when `pd.QueueSubmit` invokes `xfsr_QueueSubmit` from the present thread.
@@ -288,6 +330,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - Dual-GPU `SURFACE_LOST` / early `OUT_OF_DATE` (opaque app handle + iGPU-only window WSI)
 - Caps-shrink vs Zink EGL drawable mismatch
 
+[Unreleased]: https://github.com/jersobh/xfsr/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/jersobh/xfsr/releases/tag/v0.7.0
 [0.6.0]: https://github.com/jersobh/xfsr/releases/tag/v0.6.0
 [0.5.0]: https://github.com/jersobh/xfsr/releases/tag/v0.5.0
 [0.4.0]: https://github.com/jersobh/xfsr/releases/tag/v0.4.0

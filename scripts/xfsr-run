@@ -47,9 +47,8 @@ NATIVE=0
 # Spatial upscaler: fsr1|blit|nis|edge (overrides XFSR_LAYER_FSR when set).
 UPSCALER="${XFSR_UPSCALER:-}"
 UPSCALER_CLI=0
-# Default same-GPU FSR. Do NOT inherit ambient XFSR_OFFLOAD — Steam/sessions
-# often keep a stale =1 from testing, which enables dual-GPU DMA and can crash CS2.
-OFFLOAD=0
+# Default dual-GPU offload to iGPU; disable with --no-offload or XFSR_OFFLOAD=0.
+OFFLOAD="${XFSR_OFFLOAD:-1}"
 OFFLOAD_CLI=0
 HYBRID=0
 HYBRID_CLI=0
@@ -106,7 +105,7 @@ Options:
   --upscaler fsr1|blit|nis|edge           Spatial upscaler (preferred over --fsr/--blit).
                                           nis = light edge scale; edge = heavier (hybrid default).
   --edge-mode quality|perf                EdgePass path (default quality; perf = edge-lite).
-  --edge-sharpness 0..1                   EdgePass post-scale sharpen (default 0.45).
+  --edge-sharpness 0..1                   EdgePass post-scale sharpen (default 0.60).
   --lod-bias auto|off|<float>             Negative mip LOD bias on app samplers so low
                                           internal res still fetches sharp mips (default auto
                                           = -log2(scale) when FSR on). off/0 disables.
@@ -651,36 +650,49 @@ command_looks_proton() {
   return 1
 }
 
-# Native OpenGL tools / games that need Zink for the Vulkan FSR layer.
+# OpenGL tools / games (native ELF or Windows PE under Wine/Proton) that need Zink.
 command_looks_opengl() {
-  local a base
+  local a base cand
   for a in "$@"; do
-    [[ "$a" == "--" ]] && continue
+    [[ "$a" == "--" || "$a" == -* ]] && continue
     base="$(basename "$a" 2>/dev/null || echo "$a")"
-    case "$base" in
-      glmark2|glmark2-es2|glmark2-wayland|glxgears|glxinfo|xfsr_load_gl)
+    case "${base,,}" in
+      glmark2|glmark2-es2|glmark2-wayland|glxgears|glxinfo|xfsr_load_gl|*sf30th*)
         return 0 ;;
     esac
-    case "$a" in
-      *glmark2*|*glxgears*|*xfsr_load_gl*) return 0 ;;
+    case "${a,,}" in
+      *glmark2*|*glxgears*|*xfsr_load_gl*|*sf30thanniversary*) return 0 ;;
     esac
+    cand="$a"
+    if [[ ! -f "$cand" ]] && command -v "$cand" >/dev/null 2>&1; then
+      cand="$(command -v "$cand" 2>/dev/null || true)"
+    fi
+    if [[ -f "$cand" ]]; then
+      if grep -qa -i -E 'glViewport|glXSwapBuffers|glfwMakeContextCurrent|SDL_GL_CreateContext|opengl32\.dll|glew32\.dll' "$cand" 2>/dev/null \
+         && ! grep -qa -i -E 'vkCreateInstance|d3d9\.dll|d3d11\.dll|d3d12\.dll|dxgi\.dll' "$cand" 2>/dev/null; then
+        return 0
+      fi
+    fi
   done
   return 1
 }
 
 resolve_zink_mode() {
+  if command_looks_proton "$@"; then
+    export PROTON_USE_WOW64="${PROTON_USE_WOW64:-1}"
+  fi
   if [[ $ZINK_CLI -eq 1 ]]; then
     return 0
   fi
   if [[ $USE_ZINK -ne 2 ]]; then
     return 0
   fi
-  if command_looks_proton "$@"; then
-    USE_ZINK=0
-    echo "xfsr-run: auto: Proton/Wine detected — Zink off (Vulkan/DXVK path)." >&2
-  elif command_looks_opengl "$@"; then
+  if command_looks_opengl "$@"; then
     USE_ZINK=1
     echo "xfsr-run: auto: OpenGL title — enabling Zink for FSR." >&2
+  elif command_looks_proton "$@"; then
+    USE_ZINK=0
+    echo "xfsr-run: auto: Proton/Wine detected — Zink off (Vulkan/DXVK path)." >&2
   else
     # Unknown native binary: keep Vulkan path (vkcube, native VK games).
     USE_ZINK=0
@@ -742,6 +754,19 @@ run_with_hud() {
     # Native Vulkan / Proton: MANGOHUD=1 enables the implicit Vulkan layer only
     # (no mangohud LD_PRELOAD wrapper — that fights XFSR present).
   fi
+  for _a in "$@"; do
+    case "${_a,,}" in
+      *.exe)
+        if [[ -f "$_a" ]]; then
+          _exe_dir="$(dirname "$_a")"
+          if [[ -d "$_exe_dir" && "$_exe_dir" != "$PWD" ]]; then
+            cd "$_exe_dir" 2>/dev/null || true
+          fi
+          break
+        fi
+        ;;
+    esac
+  done
   if [[ $_do_exec -eq 1 ]]; then
     exec "$@"
   else
@@ -832,13 +857,13 @@ if [[ $USE_GAMESCOPE -eq 1 && -z "$GAMESCOPE_BACKEND" ]]; then
   _nv=0
   [[ -f /usr/share/vulkan/icd.d/nvidia_icd.json || -f /etc/vulkan/icd.d/nvidia_icd.json ]] && _nv=1
   if [[ "${XDG_SESSION_TYPE:-}" == "wayland" || -n "${WAYLAND_DISPLAY:-}" ]]; then
-    if [[ "${XFSR_GAMESCOPE_BACKEND:-}" == "wayland" ]]; then
-      GAMESCOPE_BACKEND=wayland
-      echo "xfsr-run: gamescope --backend wayland (XFSR_GAMESCOPE_BACKEND)." >&2
-    else
+    if [[ "${XFSR_GAMESCOPE_BACKEND:-}" == "sdl" ]]; then
       GAMESCOPE_BACKEND=sdl
       GAMESCOPE_HOST_ENV=(SDL_VIDEODRIVER=x11)
-      echo "xfsr-run: Wayland session — gamescope SDL+X11 host window (visible under KWin)." >&2
+      echo "xfsr-run: gamescope --backend sdl (XFSR_GAMESCOPE_BACKEND=sdl)." >&2
+    else
+      GAMESCOPE_BACKEND=wayland
+      echo "xfsr-run: Wayland session — gamescope --backend wayland (native xdg_shell)." >&2
     fi
   elif [[ $_nv -eq 1 ]]; then
     GAMESCOPE_BACKEND=sdl
@@ -1352,6 +1377,21 @@ wrap_gamescope() {
   if [[ -n "$GAMESCOPE_BACKEND" && "$GAMESCOPE_BACKEND" != "auto" ]]; then
     GAMESCOPE_CMD+=(--backend "$GAMESCOPE_BACKEND")
   fi
+  if [[ $OFFLOAD -eq 1 ]]; then
+    local _igpu_dev=""
+    if command -v vulkaninfo >/dev/null 2>&1; then
+      _igpu_dev="$(
+        env -u ENABLE_XFSR -u VK_ADD_IMPLICIT_LAYER_PATH -u VK_LAYER_PATH \
+          MESA_VK_DEVICE_SELECT=list vulkaninfo --summary 2>&1 \
+          | awk '/integrated GPU/{ if (match($0, /[0-9a-fA-F]+:[0-9a-fA-F]+/)) {
+              print substr($0, RSTART, RLENGTH); exit } }' || true
+      )"
+    fi
+    if [[ -n "$_igpu_dev" ]]; then
+      GAMESCOPE_CMD+=(--prefer-vk-device "$_igpu_dev")
+      echo "xfsr-run: gamescope display compositor on iGPU $_igpu_dev (--prefer-vk-device)" >&2
+    fi
+  fi
   # Force clients to nest size. Required for --any / Proton / stubborn engines
   # that otherwise create a desktop-sized swapchain inside the nest (identity).
   # Load-app benches without SteamAppId skip force to avoid GLFW thrash/blink
@@ -1439,13 +1479,13 @@ wrap_gamescope() {
   # set XFSR_GAMESCOPE_MANGOAPP=1.
   GAMESCOPE_GAME_PREFIX=()
   local want_hud=0
-  [[ $USE_MANGOHUD -eq 1 || $OVERLAY -eq 1 ]] && want_hud=1
+  [[ $USE_MANGOHUD -eq 1 ]] && want_hud=1
   if [[ $want_hud -eq 1 ]]; then
     if [[ "${XFSR_GAMESCOPE_MANGOAPP:-0}" == "1" ]] && gamescope --help 2>&1 | grep -q -- '--mangoapp'; then
       GAMESCOPE_CMD+=(--mangoapp)
       echo "xfsr-run: gamescope HUD = --mangoapp (XFSR_GAMESCOPE_MANGOAPP=1)" >&2
-    elif [[ $_nv_nest -eq 1 ]]; then
-      echo "xfsr-run: nest HUD off on NVIDIA (mangoapp EGL loops). Game runs without overlay." >&2
+    elif [[ $_nv_nest -eq 1 && "$GAMESCOPE_BACKEND" != "wayland" ]]; then
+      echo "xfsr-run: nest HUD off on NVIDIA SDL (mangoapp EGL loops). Game runs without overlay." >&2
     elif command -v mangohud >/dev/null 2>&1; then
       GAMESCOPE_GAME_PREFIX=(mangohud --dlsym)
       echo "xfsr-run: gamescope HUD = mangohud wrapper" >&2

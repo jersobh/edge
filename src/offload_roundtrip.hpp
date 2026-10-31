@@ -1,9 +1,11 @@
 #pragma once
 
+#include "edge_pass.hpp"
 #include "frame_transfer.hpp"
 #include "fsr_pass.hpp"
+#include "nis_pass.hpp"
 
-// Fused dGPU → iGPU(FSR) → dGPU offload round trip.
+// Fused dGPU → iGPU(FSR/Edge/NIS/Blit) → dGPU offload round trip.
 //
 // The legacy path chained two independent FrameTransfer pipelines with a
 // blocking iGPU FSR submit in between (upload; FSR + host wait; download).
@@ -26,6 +28,14 @@
 // Pipeline state lives in the FrameTransfers (framesProduced / pendingUpload),
 // so FrameTransfer::resetPipeline() (resize/destroy) resets this too.
 struct OffloadRoundTrip {
+    using RecordFn = const GpuImage& (*)(void* user, VkCommandBuffer cmd, const GpuImage& src);
+
+    static const GpuImage& submitCustom(FrameTransfer& fwd, FrameTransfer& back, RecordFn recordFn,
+                                        void* user, const GpuImage& appImage, uint32_t waitSemCount,
+                                        const VkSemaphore* waitSems,
+                                        const VkPipelineStageFlags* waitStages,
+                                        VkImageLayout appLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+
     // Returns the display-sized dGPU image (SHADER_READ_ONLY) to present this
     // frame. Adds 2 frames of latency in steady state (legacy path: up to 4).
     static const GpuImage& submit(FrameTransfer& fwd, FrameTransfer& back, FsrPass& fsr,
@@ -33,6 +43,24 @@ struct OffloadRoundTrip {
                                   const VkSemaphore* waitSems,
                                   const VkPipelineStageFlags* waitStages,
                                   VkImageLayout appLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+
+    static const GpuImage& submit(FrameTransfer& fwd, FrameTransfer& back, EdgePass& edge,
+                                  const GpuImage& appImage, uint32_t waitSemCount,
+                                  const VkSemaphore* waitSems,
+                                  const VkPipelineStageFlags* waitStages,
+                                  VkImageLayout appLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+
+    static const GpuImage& submit(FrameTransfer& fwd, FrameTransfer& back, NisPass& nis,
+                                  const GpuImage& appImage, uint32_t waitSemCount,
+                                  const VkSemaphore* waitSems,
+                                  const VkPipelineStageFlags* waitStages,
+                                  VkImageLayout appLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+
+    static const GpuImage& submitBlit(FrameTransfer& fwd, FrameTransfer& back, EdgePass& edgeScratch,
+                                      const GpuImage& appImage, uint32_t waitSemCount,
+                                      const VkSemaphore* waitSems,
+                                      const VkPipelineStageFlags* waitStages,
+                                      VkImageLayout appLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
 
     // XFSR_RT_LEGACY=1 → old chained path (A/B benchmarking).
     static bool legacyRequested();
