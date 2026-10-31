@@ -2,12 +2,57 @@
 
 #include <cstdlib>
 #include <string>
+#include <sys/stat.h>
+#if defined(__linux__) || defined(__APPLE__)
+#include <dlfcn.h>
+#endif
 
-// SPIR-V search order: XFSR_SHADER_DIR → compile-time SHADER_DIR (build tree).
+// SPIR-V search order:
+//   1. XFSR_SHADER_DIR env var
+//   2. <module_dir>/shaders (build tree alongside libVkLayer_XFSR.so / xfsr-demo)
+//   3. <module_dir>/../share/xfsr/shaders (installed prefix, e.g. ~/.local or /usr)
+//   4. $XDG_DATA_HOME/xfsr/shaders or $HOME/.local/share/xfsr/shaders
+//   5. ./shaders
 inline std::string xfsrShaderDir() {
+    auto dirHasShaders = [](const std::string& d) -> bool {
+        if (d.empty()) return false;
+        struct stat st{};
+        std::string probe = d + "/fsr_easu_fp32.comp.spv";
+        if (::stat(probe.c_str(), &st) == 0) return true;
+        probe = d + "/edge_pass.comp.spv";
+        return ::stat(probe.c_str(), &st) == 0;
+    };
+
     if (const char* e = std::getenv("XFSR_SHADER_DIR")) {
         if (e[0]) return e;
     }
+
+#if defined(__linux__) || defined(__APPLE__)
+    Dl_info info{};
+    if (dladdr(reinterpret_cast<const void*>(&xfsrShaderDir), &info) != 0 && info.dli_fname) {
+        std::string p(info.dli_fname);
+        auto slash = p.find_last_of('/');
+        if (slash != std::string::npos) {
+            std::string modDir = p.substr(0, slash);
+            if (dirHasShaders(modDir + "/shaders")) return modDir + "/shaders";
+            if (dirHasShaders(modDir + "/../share/xfsr/shaders")) return modDir + "/../share/xfsr/shaders";
+        }
+    }
+#endif
+
+    if (const char* xdg = std::getenv("XDG_DATA_HOME")) {
+        if (xdg[0] && dirHasShaders(std::string(xdg) + "/xfsr/shaders")) {
+            return std::string(xdg) + "/xfsr/shaders";
+        }
+    }
+    if (const char* home = std::getenv("HOME")) {
+        if (home[0] && dirHasShaders(std::string(home) + "/.local/share/xfsr/shaders")) {
+            return std::string(home) + "/.local/share/xfsr/shaders";
+        }
+    }
+    if (dirHasShaders("/usr/local/share/xfsr/shaders")) return "/usr/local/share/xfsr/shaders";
+    if (dirHasShaders("/usr/share/xfsr/shaders")) return "/usr/share/xfsr/shaders";
+
 #ifdef SHADER_DIR
     return SHADER_DIR;
 #else

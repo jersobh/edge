@@ -1,0 +1,7 @@
+[submodule "third_party/FidelityFX-FSR2"]
+	path = third_party/FidelityFX-FSR2
+	url = https://github.com/TheJackiMonster/FidelityFX-FSR2.git
+[submodule "third_party/FidelityFX-SDK"]
+	path = third_party/FidelityFX-SDK
+	url = https://github.com/DethRaid/FidelityFX-SDK-Linux.git
+

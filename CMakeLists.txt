@@ -180,7 +180,6 @@ target_include_directories(xfsr_core PUBLIC
 )
 target_compile_definitions(xfsr_core PUBLIC
   VK_NO_PROTOTYPES
-  SHADER_DIR="${SHADER_BIN_DIR}"
 )
 target_compile_options(xfsr_core PRIVATE -Wall -Wextra)
 target_link_libraries(xfsr_core PUBLIC ${CMAKE_DL_LIBS})
@@ -200,10 +199,6 @@ if(XFSR_BUILD_DEMO AND XFSR_HAVE_FSR3_LIBS)
   target_include_directories(xfsr-demo PRIVATE
     ${GLFW3_INCLUDE_DIRS}
     ${FFX_SDK_DIR}/include
-  )
-
-  target_compile_definitions(xfsr-demo PRIVATE
-    FFX_FSR_DIR="${FFX_FSR_DIR}"
   )
 
   target_link_libraries(xfsr-demo PRIVATE
@@ -238,7 +233,6 @@ target_include_directories(xfsr_core_layer PRIVATE
 )
 target_compile_definitions(xfsr_core_layer PRIVATE
   VK_NO_PROTOTYPES
-  SHADER_DIR="${SHADER_BIN_DIR}"
   vkGetInstanceProcAddr=volk_vkGetInstanceProcAddr
   vkGetDeviceProcAddr=volk_vkGetDeviceProcAddr
 )
@@ -273,7 +267,7 @@ set_target_properties(VkLayer_XFSR PROPERTIES
   BUILD_RPATH_USE_ORIGIN TRUE
 )
 
-set(LAYER_LIB_PATH ${CMAKE_CURRENT_BINARY_DIR}/libVkLayer_XFSR.so)
+set(LAYER_LIB_PATH "./libVkLayer_XFSR.so")
 configure_file(
   ${CMAKE_CURRENT_SOURCE_DIR}/layer/VkLayer_XFSR.json.in
   ${CMAKE_CURRENT_BINARY_DIR}/VkLayer_XFSR.json

@@ -1,9 +1,0 @@
-/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles/shaders.dir
-/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles/xfsr_core.dir
-/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles/xfsr_core_layer.dir
-/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles/VkLayer_XFSR.dir
-/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles/xfsr_gl_shim.dir
-/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles/install-xfsr-layer.dir
-/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles/package-xfsr.dir
-/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles/edit_cache.dir
-/home/jeff/Projects/crossvulkan/build-pkg/CMakeFiles/rebuild_cache.dir

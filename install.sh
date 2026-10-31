@@ -87,6 +87,12 @@ fi
 echo ">>> Installing into ${PREFIX}"
 mkdir -p "$BIN_DIR" "$LIB_DIR" "$LAYER_DIR" "$SHADER_DIR"
 install -m 755 "${STAGE}/bin/xfsr-run" "${BIN_DIR}/xfsr-run"
+if [ -f "${STAGE}/bin/xfsr-auto-tune" ]; then
+  install -m 755 "${STAGE}/bin/xfsr-auto-tune" "${BIN_DIR}/xfsr-auto-tune"
+fi
+if [ -f "${STAGE}/bin/xfsr-gamescope-focus" ]; then
+  install -m 755 "${STAGE}/bin/xfsr-gamescope-focus" "${BIN_DIR}/xfsr-gamescope-focus"
+fi
 install -m 755 "${STAGE}/lib/libVkLayer_XFSR.so" \
   "${LIB_DIR}/libVkLayer_XFSR.so"
 if [ -f "${STAGE}/lib/libxfsr_gl_shim.so" ]; then
@@ -96,8 +102,17 @@ fi
 if [ -d "${STAGE}/share/xfsr/shaders" ]; then
   cp -a "${STAGE}/share/xfsr/shaders/." "${SHADER_DIR}/"
 fi
+if [ -f "${STAGE}/share/xfsr/profiles.example.conf" ]; then
+  install -m 644 "${STAGE}/share/xfsr/profiles.example.conf" \
+    "${PREFIX}/share/xfsr/profiles.example.conf"
+  CFG_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/xfsr"
+  mkdir -p "$CFG_DIR"
+  if [ ! -f "${CFG_DIR}/profiles.conf" ]; then
+    install -m 644 "${STAGE}/share/xfsr/profiles.example.conf" "${CFG_DIR}/profiles.conf"
+  fi
+fi
 
-# Point the layer JSON at the installed .so (absolute path).
+# Point the layer JSON at the installed .so (relative path for pressure-vessel portability).
 SO_PATH="$(cd "$LIB_DIR" && pwd)/libVkLayer_XFSR.so"
 JSON_SRC="${STAGE}/share/vulkan/implicit_layer.d/VkLayer_XFSR.json"
 JSON_DST="${LAYER_DIR}/VkLayer_XFSR.json"
@@ -106,13 +121,14 @@ if command -v python3 >/dev/null 2>&1; then
 import json, os, pathlib
 src = pathlib.Path(os.environ["JSON_SRC"])
 dst = pathlib.Path(os.environ["JSON_DST"])
+lib = pathlib.Path(os.environ["SO_PATH"]).resolve()
 data = json.loads(src.read_text())
-data["layer"]["library_path"] = os.environ["SO_PATH"]
+data["layer"]["library_path"] = os.path.relpath(lib, dst.parent)
 dst.write_text(json.dumps(data, indent=2) + "\n")
 PY
 else
-  # Fallback: rewrite library_path with sed (JSON stays valid enough for the loader).
-  sed "s|\"library_path\"[[:space:]]*:[[:space:]]*\"[^\"]*\"|\"library_path\": \"${SO_PATH}\"|" \
+  # Fallback: rewrite library_path with sed (relative to share/vulkan/implicit_layer.d).
+  sed "s|\"library_path\"[[:space:]]*:[[:space:]]*\"[^\"]*\"|\"library_path\": \"../../../lib/libVkLayer_XFSR.so\"|" \
     "$JSON_SRC" > "$JSON_DST"
 fi
 
