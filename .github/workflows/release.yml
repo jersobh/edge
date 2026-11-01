@@ -58,6 +58,8 @@ jobs:
         with:
           name: edgescale-${{ steps.ver.outputs.version }}-linux-x86_64
           path: |
+            dist/edgescale-${{ steps.ver.outputs.version }}-linux-x86_64.tar.gz
+            dist/edgescale-linux-x86_64.tar.gz
             dist/xfsr-${{ steps.ver.outputs.version }}-linux-x86_64.tar.gz
             dist/xfsr-linux-x86_64.tar.gz
 

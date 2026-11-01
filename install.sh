@@ -66,21 +66,26 @@ else
   VER="${TAG#v}"
 fi
 
-ASSET="xfsr-${VER}-linux-${ARCH}.tar.gz"
+ASSET="edgescale-${VER}-linux-${ARCH}.tar.gz"
 URL="https://github.com/${REPO}/releases/download/${TAG}/${ASSET}"
 
 echo ">>> Downloading ${TAG} (${ASSET})"
-if ! curl -fL --progress-bar -o "${TMP}/${ASSET}" "$URL"; then
-  echo "xfsr-run: download failed:" >&2
-  echo "  ${URL}" >&2
-  exit 1
+if ! curl -fL --progress-bar -o "${TMP}/${ASSET}" "$URL" 2>/dev/null; then
+  echo ">>> Primary package not found, falling back to legacy xfsr package..."
+  ASSET="xfsr-${VER}-linux-${ARCH}.tar.gz"
+  URL="https://github.com/${REPO}/releases/download/${TAG}/${ASSET}"
+  if ! curl -fL --progress-bar -o "${TMP}/${ASSET}" "$URL"; then
+    echo "edgescale / xfsr-run: download failed:" >&2
+    echo "  ${URL}" >&2
+    exit 1
+  fi
 fi
 
 echo ">>> Extracting"
 tar -xzf "${TMP}/${ASSET}" -C "$TMP"
-STAGE="$(find "$TMP" -maxdepth 1 -type d -name 'xfsr-*' | head -n 1)"
-if [ -z "$STAGE" ] || [ ! -f "${STAGE}/bin/xfsr-run" ]; then
-  echo "xfsr-run: unexpected archive contents" >&2
+STAGE="$(find "$TMP" -maxdepth 1 -type d \( -name 'edgescale-*' -o -name 'xfsr-*' \) | head -n 1)"
+if [ -z "$STAGE" ] || { [ ! -f "${STAGE}/bin/edgerun" ] && [ ! -f "${STAGE}/bin/xfsr-run" ]; }; then
+  echo "edgescale: unexpected archive contents" >&2
   exit 1
 fi
 
@@ -120,12 +125,16 @@ if [ -f "${STAGE}/share/xfsr/profiles.example.conf" ]; then
   fi
 fi
 
-# Point the layer JSON at the installed .so (relative path for pressure-vessel portability).
+# Point the layer JSONs at the installed .so (relative path for pressure-vessel portability).
 SO_PATH="$(cd "$LIB_DIR" && pwd)/libVkLayer_XFSR.so"
-JSON_SRC="${STAGE}/share/vulkan/implicit_layer.d/VkLayer_XFSR.json"
-JSON_DST="${LAYER_DIR}/VkLayer_XFSR.json"
-if command -v python3 >/dev/null 2>&1; then
-  SO_PATH="$SO_PATH" JSON_SRC="$JSON_SRC" JSON_DST="$JSON_DST" python3 - <<'PY'
+for json_name in VkLayer_EdgeScale.json VkLayer_XFSR.json; do
+  JSON_SRC="${STAGE}/share/vulkan/implicit_layer.d/${json_name}"
+  JSON_DST="${LAYER_DIR}/${json_name}"
+  if [ ! -f "$JSON_SRC" ]; then
+    continue
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    SO_PATH="$SO_PATH" JSON_SRC="$JSON_SRC" JSON_DST="$JSON_DST" python3 - <<'PY'
 import json, os, pathlib
 src = pathlib.Path(os.environ["JSON_SRC"])
 dst = pathlib.Path(os.environ["JSON_DST"])
@@ -134,11 +143,12 @@ data = json.loads(src.read_text())
 data["layer"]["library_path"] = os.path.relpath(lib, dst.parent)
 dst.write_text(json.dumps(data, indent=2) + "\n")
 PY
-else
-  # Fallback: rewrite library_path with sed (relative to share/vulkan/implicit_layer.d).
-  sed "s|\"library_path\"[[:space:]]*:[[:space:]]*\"[^\"]*\"|\"library_path\": \"../../../lib/libVkLayer_XFSR.so\"|" \
-    "$JSON_SRC" > "$JSON_DST"
-fi
+  else
+    # Fallback: rewrite library_path with sed (relative to share/vulkan/implicit_layer.d).
+    sed "s|\"library_path\"[[:space:]]*:[[:space:]]*\"[^\"]*\"|\"library_path\": \"../../../lib/libVkLayer_XFSR.so\"|" \
+      "$JSON_SRC" > "$JSON_DST"
+  fi
+done
 
 # PATH hint
 case ":${PATH}:" in
