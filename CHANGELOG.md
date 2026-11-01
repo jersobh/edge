@@ -5,6 +5,21 @@ All notable changes to **xfsr** / **xfsr-run** are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [0.8.2] — 2026-11-01
+
+### Added
+
+- **Windows Native Vulkan Support**:
+  - Added native Windows x86_64 implicit Vulkan layer support (`VkLayer_XFSR.dll`) exporting `vkGetInstanceProcAddr`, `vkGetDeviceProcAddr`, and `vkNegotiateLoaderLayerInterfaceVersion`.
+  - In-game Win32 hotkey polling using `GetAsyncKeyState` (`F1` preset, `F2` RCAS/edge-mode, `F3` upscaler cycle, `F10` pin).
+  - Win32 memory alignment and platform abstractions (`_aligned_malloc`, `_putenv_s`, `%LOCALAPPDATA%\EdgeScale` shader resolution, and `%TEMP%` control files).
+  - Windows batch build & installation scripts ([`scripts/build-windows.bat`](scripts/build-windows.bat), [`scripts/install-windows.bat`](scripts/install-windows.bat), and [`scripts/uninstall-windows.bat`](scripts/uninstall-windows.bat)).
+  - Standalone Linux-to-Windows cross-compilation pipeline ([`scripts/build-windows-cross.sh`](scripts/build-windows-cross.sh)).
+  - Automated Windows packaging and release artifact generation in GitHub Actions (`.github/workflows/release.yml`).
+- **Technical Documentation & Branding**:
+  - Comprehensive architectural deep-dive and comparison with Lossless Scaling and Magpie ([`docs/ARCHITECTURE_AND_COMPARISON.md`](docs/ARCHITECTURE_AND_COMPARISON.md)).
+  - Integrated official project logo into README and updated all project links to `https://github.com/jersobh/edge`.
+
 ## [0.8.1] — 2026-11-01
 
 ### Changed
@@ -347,7 +362,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - Dual-GPU `SURFACE_LOST` / early `OUT_OF_DATE` (opaque app handle + iGPU-only window WSI)
 - Caps-shrink vs Zink EGL drawable mismatch
 
-[Unreleased]: https://github.com/jersobh/edge/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/jersobh/edge/compare/v0.8.2...HEAD
+[0.8.2]: https://github.com/jersobh/edge/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/jersobh/edge/releases/tag/v0.8.1
 [0.8.0]: https://github.com/jersobh/edge/releases/tag/v0.8.0
 [0.7.0]: https://github.com/jersobh/edge/releases/tag/v0.7.0

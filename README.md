@@ -14,7 +14,7 @@
 
 Wrap your game launch in Steam with `edgerun %command%` to render lower and reconstruct crisp native resolution frames with near-zero latency.
 
-**Current version:** [0.8.1](https://github.com/jersobh/edge/releases/tag/v0.8.1)  
+**Current version:** [0.8.2](https://github.com/jersobh/edge/releases/tag/v0.8.2)  
 *(Formerly known as `xfsr`; `xfsr-run` is preserved as an alias for full backward compatibility).*
 
 **Documentation & Deep-Dive:**
