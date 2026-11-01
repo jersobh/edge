@@ -36,16 +36,19 @@ if [[ -f "$ROOT/share/xfsr/profiles.example.conf" ]]; then
   install -m 644 "$ROOT/share/xfsr/profiles.example.conf" "$STAGE/share/xfsr/profiles.example.conf"
 fi
 
-# Layer JSON with relative library path (resolved from install prefix by install.sh)
+# Layer JSONs with relative library path (resolved from install prefix by install.sh)
 python3 - <<PY
 import json, pathlib
-src = pathlib.Path("$BUILD/VkLayer_XFSR.json")
-dst = pathlib.Path("$STAGE/share/vulkan/implicit_layer.d/VkLayer_XFSR.json")
-data = json.loads(src.read_text())
-data["layer"]["library_path"] = "../../../lib/libVkLayer_XFSR.so"
-data["layer"]["implementation_version"] = "${VERSION}".split(".")[0]
-dst.write_text(json.dumps(data, indent=2) + "\n")
-print("wrote", dst)
+for name in ["VkLayer_XFSR.json", "VkLayer_EdgeScale.json"]:
+    src = pathlib.Path(f"$BUILD/{name}")
+    if not src.exists():
+        continue
+    dst = pathlib.Path(f"$STAGE/share/vulkan/implicit_layer.d/{name}")
+    data = json.loads(src.read_text())
+    data["layer"]["library_path"] = "../../../lib/libVkLayer_XFSR.so"
+    data["layer"]["implementation_version"] = "${VERSION}".split(".")[0]
+    dst.write_text(json.dumps(data, indent=2) + "\n")
+    print("wrote", dst)
 PY
 
 # SPIR-V the layer loads (FSR, NIS, Edge, + blit helpers)

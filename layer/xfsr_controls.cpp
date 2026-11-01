@@ -2,11 +2,14 @@
 
 #include "common.hpp"
 
+#if !defined(_WIN32)
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <linux/input.h>
 #include <dirent.h>
 #include <sys/ioctl.h>
+#include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -19,7 +22,6 @@
 #include <mutex>
 #include <string>
 #include <sys/stat.h>
-#include <unistd.h>
 #include <vector>
 
 namespace xfsr_ctrl {
@@ -224,6 +226,7 @@ uint32_t renderDim(uint32_t display, float scale) {
 
 Runtime g_rt;
 
+#if !defined(_WIN32)
 using XOpenDisplay_fn = void* (*)(const char*);
 using XCloseDisplay_fn = int (*)(void*);
 using XQueryKeymap_fn = int (*)(void*, char[32]);
@@ -252,6 +255,7 @@ struct Evdev {
 };
 
 Evdev g_evdev;
+#endif
 KeyBits g_prevKeys{};
 
 int presetIndexFromName(const char* p) {
@@ -306,6 +310,7 @@ int readSysInt(const char* path) {
 }
 
 void discoverGpus() {
+#if !defined(_WIN32)
     if (g_metrics.gpuN > 0) return;
     DIR* dir = opendir("/sys/class/drm");
     if (!dir) return;
@@ -352,9 +357,11 @@ void discoverGpus() {
         ++g_metrics.gpuN;
     }
     closedir(dir);
+#endif
 }
 
 int sampleCpuPercent() {
+#if !defined(_WIN32)
     static unsigned long long prevIdle = 0, prevTotal = 0;
     static bool have = false;
     FILE* f = std::fopen("/proc/stat", "r");
@@ -377,6 +384,9 @@ int sampleCpuPercent() {
     prevTotal = total;
     have = true;
     return pct;
+#else
+    return -1;
+#endif
 }
 
 void sampleMetricsLocked() {
@@ -582,6 +592,19 @@ void tickAdaptiveLocked() {
     setScaleLocked(g_rt.scale + step, true, true);
 }
 
+#if defined(_WIN32)
+KeyBits readKeysWin32() {
+    KeyBits k{};
+    k.f1 = (GetAsyncKeyState(VK_F1) & 0x8000) != 0;
+    k.f2 = (GetAsyncKeyState(VK_F2) & 0x8000) != 0;
+    k.f3 = (GetAsyncKeyState(VK_F3) & 0x8000) != 0;
+    k.f4 = (GetAsyncKeyState(VK_F4) & 0x8000) != 0;
+    k.f5 = (GetAsyncKeyState(VK_F5) & 0x8000) != 0;
+    k.f10 = (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
+    k.shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+    return k;
+}
+#else
 bool ensureX11() {
     if (g_x11.ready) return true;
     if (g_x11.gaveUp) return false;
@@ -715,6 +738,7 @@ KeyBits mergeKeys(const KeyBits& a, const KeyBits& b) {
     k.shift = a.shift || b.shift;
     return k;
 }
+#endif
 
 void applyHotkeyActions(const KeyBits& cur, const KeyBits& prev, bool modOk) {
     if (!modOk) return;
@@ -760,6 +784,16 @@ void applyHotkeyActions(const KeyBits& cur, const KeyBits& prev, bool modOk) {
 }
 
 void pollHotkeysLocked() {
+#if defined(_WIN32)
+    const KeyBits cur = readKeysWin32();
+    if (!g_rt.loggedKeys) {
+        g_rt.loggedKeys = true;
+        std::fprintf(stderr,
+                     "[edgescale] hotkeys: win32=yes mod=%s  "
+                     "(F1 preset F2 RCAS/edge-mode F3 FSR F4 offload F5 one-way F10 pin)\n",
+                     g_rt.requireMod ? "Shift+" : "none");
+    }
+#else
     const KeyBits x11 = readKeysX11();
     const KeyBits ev = readKeysEvdev();
     const KeyBits cur = mergeKeys(x11, ev);
@@ -774,6 +808,7 @@ void pollHotkeysLocked() {
                          ? " - use control file if keys fail"
                          : "");
     }
+#endif
     const bool modOk = !g_rt.requireMod || cur.shift;
     applyHotkeyActions(cur, g_prevKeys, modOk);
     g_prevKeys = cur;
@@ -1294,20 +1329,36 @@ void initFromEnv() {
     if (cpath && cpath[0]) {
         std::snprintf(g_rt.controlPath, sizeof(g_rt.controlPath), "%s", cpath);
     } else {
+#if defined(_WIN32)
+        const char* tmp = std::getenv("TEMP");
+        if (!tmp || !tmp[0]) tmp = std::getenv("TMP");
+        if (!tmp || !tmp[0]) tmp = "C:\\Windows\\Temp";
+        std::snprintf(g_rt.controlPath, sizeof(g_rt.controlPath), "%s\\edgescale-control-%d.txt",
+                      tmp, static_cast<int>(getpid()));
+#else
         const char* rt = std::getenv("XDG_RUNTIME_DIR");
         if (rt && rt[0])
             std::snprintf(g_rt.controlPath, sizeof(g_rt.controlPath), "%s/edgescale-control", rt);
         else
             std::snprintf(g_rt.controlPath, sizeof(g_rt.controlPath), "/tmp/edgescale-control-%d",
                           static_cast<int>(getpid()));
+#endif
     }
     {
+#if defined(_WIN32)
+        const char* tmp = std::getenv("TEMP");
+        if (!tmp || !tmp[0]) tmp = std::getenv("TMP");
+        if (!tmp || !tmp[0]) tmp = "C:\\Windows\\Temp";
+        std::snprintf(g_rt.statusPath, sizeof(g_rt.statusPath), "%s\\edgescale-status-%d.txt",
+                      tmp, static_cast<int>(getpid()));
+#else
         const char* rt = std::getenv("XDG_RUNTIME_DIR");
         if (rt && rt[0])
             std::snprintf(g_rt.statusPath, sizeof(g_rt.statusPath), "%s/edgescale-status", rt);
         else
             std::snprintf(g_rt.statusPath, sizeof(g_rt.statusPath), "/tmp/edgescale-status-%d",
                           static_cast<int>(getpid()));
+#endif
     }
 
     g_rt.lastScaleChange = std::chrono::steady_clock::now();
@@ -1320,6 +1371,7 @@ void initFromEnv() {
                      g_rt.overlayPinned ? " [overlay pinned]" : "", g_rt.controlPath);
         // Touch the control file so the path always exists for scripting.
         std::ofstream touch(g_rt.controlPath, std::ios::app);
+#if !defined(_WIN32)
         const char* rt = std::getenv("XDG_RUNTIME_DIR");
         if (rt && rt[0]) {
             char legacyCtrl[512];
@@ -1329,6 +1381,7 @@ void initFromEnv() {
             std::snprintf(legacyStatus, sizeof(legacyStatus), "%s/xfsr-status", rt);
             (void)::symlink(g_rt.statusPath, legacyStatus);
         }
+#endif
     }
     if (g_rt.adaptive && !g_rt.loggedAdaptive) {
         g_rt.loggedAdaptive = true;

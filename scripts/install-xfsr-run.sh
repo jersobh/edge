@@ -6,7 +6,7 @@
 #   ~/.local/share/xfsr/shaders/*.spv
 #
 # Prefer the one-liner for binary installs:
-#   curl -fsSL https://raw.githubusercontent.com/jersobh/xfsr/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/jersobh/edge/main/install.sh | bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="${XFSR_BUILD:-$ROOT/build}"
@@ -53,17 +53,20 @@ shopt -u nullglob
 
 python3 - <<PY
 import json, pathlib, os
-src = pathlib.Path("$BUILD/VkLayer_XFSR.json")
-dst = pathlib.Path("$PREFIX/share/vulkan/implicit_layer.d/VkLayer_XFSR.json")
 lib = pathlib.Path("$PREFIX/lib/libVkLayer_XFSR.so").resolve()
-data = json.loads(src.read_text())
-# Relative to the JSON dir so pressure-vessel path rewrites stay valid.
-data["layer"]["library_path"] = os.path.relpath(lib, dst.parent)
-# Keep api_version conservative for older Steam loaders.
-data["layer"]["api_version"] = data["layer"].get("api_version", "1.3.0")
-dst.write_text(json.dumps(data, indent=2) + "\n")
-print("wrote", dst)
-print("library_path =", data["layer"]["library_path"])
+for name in ["VkLayer_XFSR.json", "VkLayer_EdgeScale.json"]:
+    src = pathlib.Path(f"$BUILD/{name}")
+    if not src.exists():
+        continue
+    dst = pathlib.Path(f"$PREFIX/share/vulkan/implicit_layer.d/{name}")
+    data = json.loads(src.read_text())
+    # Relative to the JSON dir so pressure-vessel path rewrites stay valid.
+    data["layer"]["library_path"] = os.path.relpath(lib, dst.parent)
+    # Keep api_version conservative for older Steam loaders.
+    data["layer"]["api_version"] = data["layer"].get("api_version", "1.3.0")
+    dst.write_text(json.dumps(data, indent=2) + "\n")
+    print("wrote", dst)
+print("library_path =", os.path.relpath(lib, dst.parent))
 # Show glibc deps — anything > 2.31 needs PV host-lib RPATH to load in Proton.
 import subprocess
 out = subprocess.check_output(["objdump", "-T", str(lib)], text=True, stderr=subprocess.DEVNULL)

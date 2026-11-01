@@ -347,16 +347,16 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - Dual-GPU `SURFACE_LOST` / early `OUT_OF_DATE` (opaque app handle + iGPU-only window WSI)
 - Caps-shrink vs Zink EGL drawable mismatch
 
-[Unreleased]: https://github.com/jersobh/xfsr/compare/v0.8.1...HEAD
-[0.8.1]: https://github.com/jersobh/xfsr/releases/tag/v0.8.1
-[0.8.0]: https://github.com/jersobh/xfsr/releases/tag/v0.8.0
-[0.7.0]: https://github.com/jersobh/xfsr/releases/tag/v0.7.0
-[0.6.0]: https://github.com/jersobh/xfsr/releases/tag/v0.6.0
-[0.5.0]: https://github.com/jersobh/xfsr/releases/tag/v0.5.0
-[0.4.0]: https://github.com/jersobh/xfsr/releases/tag/v0.4.0
-[0.3.1]: https://github.com/jersobh/xfsr/releases/tag/v0.3.1
-[0.3.0]: https://github.com/jersobh/xfsr/releases/tag/v0.3.0
-[0.2.4]: https://github.com/jersobh/xfsr/releases/tag/v0.2.4
-[0.2.3]: https://github.com/jersobh/xfsr/releases/tag/v0.2.3
-[0.2.0]: https://github.com/jersobh/xfsr/releases/tag/v0.2.0
-[0.1.0]: https://github.com/jersobh/xfsr/releases/tag/v0.1.0
+[Unreleased]: https://github.com/jersobh/edge/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/jersobh/edge/releases/tag/v0.8.1
+[0.8.0]: https://github.com/jersobh/edge/releases/tag/v0.8.0
+[0.7.0]: https://github.com/jersobh/edge/releases/tag/v0.7.0
+[0.6.0]: https://github.com/jersobh/edge/releases/tag/v0.6.0
+[0.5.0]: https://github.com/jersobh/edge/releases/tag/v0.5.0
+[0.4.0]: https://github.com/jersobh/edge/releases/tag/v0.4.0
+[0.3.1]: https://github.com/jersobh/edge/releases/tag/v0.3.1
+[0.3.0]: https://github.com/jersobh/edge/releases/tag/v0.3.0
+[0.2.4]: https://github.com/jersobh/edge/releases/tag/v0.2.4
+[0.2.3]: https://github.com/jersobh/edge/releases/tag/v0.2.3
+[0.2.0]: https://github.com/jersobh/edge/releases/tag/v0.2.0
+[0.1.0]: https://github.com/jersobh/edge/releases/tag/v0.1.0

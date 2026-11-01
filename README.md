@@ -1,17 +1,25 @@
-# EdgeScale
+<p align="center">
+  <img src="logo.png" alt="EdgeScale Logo" width="180" />
+</p>
 
-[![Release](https://img.shields.io/github/v/release/jersobh/xfsr?display_name=tag&sort=semver)](https://github.com/jersobh/xfsr/releases/latest)
-[![Build](https://github.com/jersobh/xfsr/actions/workflows/release.yml/badge.svg)](https://github.com/jersobh/xfsr/actions/workflows/release.yml)
-[![Platform](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)](https://github.com/jersobh/xfsr/releases)
+<h1 align="center">EdgeScale</h1>
 
-**EdgeScale (`edgerun`)** — high-performance in-process GPU upscaling and companion iGPU offload for Linux games (native Vulkan, Proton/Wine, and OpenGL).
+<p align="center">
+  <a href="https://github.com/jersobh/edge/releases/latest"><img src="https://img.shields.io/github/v/release/jersobh/edge?display_name=tag&sort=semver" alt="Release" /></a>
+  <a href="https://github.com/jersobh/edge/actions/workflows/release.yml"><img src="https://github.com/jersobh/edge/actions/workflows/release.yml/badge.svg" alt="Build" /></a>
+  <a href="https://github.com/jersobh/edge/releases"><img src="https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20x86__64-lightgrey.svg" alt="Platform" /></a>
+</p>
+
+**EdgeScale (`edgerun`)** — high-performance in-process GPU upscaling and companion iGPU offload for Vulkan games (Linux native, Proton/Wine, OpenGL via Zink, and Windows native Vulkan / DXVK).
 
 Wrap your game launch in Steam with `edgerun %command%` to render lower and reconstruct crisp native resolution frames with near-zero latency.
 
-**Current version:** [0.8.1](https://github.com/jersobh/xfsr/releases/tag/v0.8.1)  
+**Current version:** [0.8.1](https://github.com/jersobh/edge/releases/tag/v0.8.1)  
 *(Formerly known as `xfsr`; `xfsr-run` is preserved as an alias for full backward compatibility).*
 
-**Roadmap:** [ROADMAP.md](ROADMAP.md) — adaptive scaling, profiles, auto-tune, dma-buf.
+**Documentation & Deep-Dive:**
+- [Architecture & Deep Comparison with Lossless Scaling & Magpie](docs/ARCHITECTURE_AND_COMPARISON.md)
+- [Project Roadmap](ROADMAP.md) — adaptive scaling, profiles, auto-tune, dma-buf.
 
 ## What it does
 
@@ -86,11 +94,32 @@ Presets control how hard it pushes:
 
 ## Install
 
+### Linux (One-Line Installer)
+
 ```sh
-curl -fsSL https://raw.githubusercontent.com/jersobh/xfsr/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/jersobh/edge/main/install.sh | sh
 ```
 
 Installs into `~/.local` (`edgerun`, `xfsr-run` alias, Vulkan layer, shaders). Put `~/.local/bin` on your `PATH` if it isn’t already.
+
+### Windows (Native Vulkan Layer)
+
+1. Download the latest `edgescale-windows-x86_64.zip` from [Releases](https://github.com/jersobh/edge/releases/latest).
+2. Extract the archive and double-click `install-windows.bat`.  
+   *(Installs to `%LOCALAPPDATA%\EdgeScale` and registers `VkLayer_EdgeScale.json` in `HKCU\Software\Khronos\Vulkan\ImplicitLayers`)*.
+3. Launch your game or Steam with environment variable:
+   ```cmd
+   set ENABLE_EDGESCALE=1
+   ```
+   Or in Steam Game Launch Options (Windows):
+   ```cmd
+   cmd /c "set ENABLE_EDGESCALE=1 && %command%"
+   ```
+4. Control presets and modes live in-game using hotkeys:
+   - **F1**: Cycle preset (`quality` &rarr; `balanced` &rarr; `performance` &rarr; `ultra`)
+   - **F2**: Toggle RCAS / Edge quality vs perf mode
+   - **F3**: Cycle upscaler (`edge` &rarr; `fsr1` &rarr; `nis` &rarr; `blit`)
+   - **F10**: Toggle HUD overlay pinning
 
 ## Steam
 

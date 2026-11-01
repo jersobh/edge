@@ -1,7 +1,5 @@
 #pragma once
 
-#include <volk.h>
-
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -12,6 +10,22 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <process.h>
+#define getpid _getpid
+static inline int setenv(const char* name, const char* value, int overwrite) {
+    if (!overwrite && std::getenv(name)) return 0;
+    return _putenv_s(name, value);
+}
+static inline int unsetenv(const char* name) {
+    return _putenv_s(name, "");
+}
+#endif
+
+#include <volk.h>
 
 inline void vkCheck(VkResult r, const char* what) {
     if (r != VK_SUCCESS) {

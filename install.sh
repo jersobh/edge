@@ -1,7 +1,7 @@
 #!/bin/sh
 # xfsr-run installer — paste this in a terminal:
 #
-#   curl -fsSL https://raw.githubusercontent.com/jersobh/xfsr/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/jersobh/edge/main/install.sh | sh
 #
 # Optional env:
 #   XFSR_VERSION=0.1.0   pin a release (default: latest)
@@ -9,7 +9,7 @@
 #   XFSR_REPO=owner/repo override GitHub repo
 set -eu
 
-REPO="${XFSR_REPO:-jersobh/xfsr}"
+REPO="${XFSR_REPO:-jersobh/edge}"
 PREFIX="${PREFIX:-${HOME}/.local}"
 BIN_DIR="${PREFIX}/bin"
 LIB_DIR="${PREFIX}/lib"

@@ -62,8 +62,16 @@ endif()
 find_program(GLSLC glslc REQUIRED)
 
 if(XFSR_BUILD_DEMO OR XFSR_BUILD_BENCH)
-  find_package(PkgConfig REQUIRED)
-  pkg_check_modules(GLFW3 REQUIRED glfw3)
+  if(WIN32)
+    find_package(glfw3 QUIET)
+    if(NOT glfw3_FOUND)
+      set(XFSR_BUILD_DEMO OFF)
+      set(XFSR_BUILD_BENCH OFF)
+    endif()
+  else()
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(GLFW3 REQUIRED glfw3)
+  endif()
 endif()
 
 set(SHADER_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/shaders)
@@ -186,8 +194,14 @@ target_include_directories(xfsr_core SYSTEM PUBLIC
 target_compile_definitions(xfsr_core PUBLIC
   VK_NO_PROTOTYPES
 )
-target_compile_options(xfsr_core PRIVATE -Wall -Wextra -Wno-missing-field-initializers)
-target_link_libraries(xfsr_core PUBLIC ${CMAKE_DL_LIBS})
+if(MSVC)
+  target_compile_options(xfsr_core PRIVATE /W3 /MP)
+else()
+  target_compile_options(xfsr_core PRIVATE -Wall -Wextra -Wno-missing-field-initializers)
+endif()
+if(NOT WIN32)
+  target_link_libraries(xfsr_core PUBLIC ${CMAKE_DL_LIBS})
+endif()
 
 if(XFSR_BUILD_DEMO AND XFSR_HAVE_FSR3_LIBS)
   add_executable(xfsr-demo
@@ -243,7 +257,11 @@ target_compile_definitions(xfsr_core_layer PRIVATE
   vkGetInstanceProcAddr=volk_vkGetInstanceProcAddr
   vkGetDeviceProcAddr=volk_vkGetDeviceProcAddr
 )
-target_compile_options(xfsr_core_layer PRIVATE -Wall -Wextra -Wno-missing-field-initializers -fvisibility=hidden)
+if(MSVC)
+  target_compile_options(xfsr_core_layer PRIVATE /W3 /MP)
+else()
+  target_compile_options(xfsr_core_layer PRIVATE -Wall -Wextra -Wno-missing-field-initializers -fvisibility=hidden)
+endif()
 set_target_properties(xfsr_core_layer PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 add_library(VkLayer_XFSR SHARED
@@ -254,30 +272,45 @@ target_include_directories(VkLayer_XFSR PRIVATE
   ${vulkan_headers_SOURCE_DIR}/include
 )
 target_compile_definitions(VkLayer_XFSR PRIVATE VK_NO_PROTOTYPES)
-target_compile_options(VkLayer_XFSR PRIVATE -fvisibility=hidden)
-target_link_libraries(VkLayer_XFSR PRIVATE ${CMAKE_DL_LIBS} stdc++)
-# Proton/steamrt ships glibc 2.31; a host-built layer needs GLIBC_2.34+ (dlopen).
-# Prefer pressure-vessel's host-lib overrides (same mechanism as MangoHud under /usr)
-# so dlopen succeeds inside the container; fall back to /usr/lib on the bare host.
-# Use classic DT_RPATH (--disable-new-dtags): Steam sets LD_LIBRARY_PATH, which
-# would otherwise beat DT_RUNPATH and keep resolving steamrt's older libc.
-target_link_options(VkLayer_XFSR PRIVATE
-  "LINKER:--disable-new-dtags"
-  "LINKER:-rpath,/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu"
-  "LINKER:-rpath,/usr/lib/pressure-vessel/overrides/lib/i386-linux-gnu"
-  "LINKER:-rpath,/usr/lib"
-)
-set_target_properties(VkLayer_XFSR PROPERTIES
-  PREFIX ""
-  OUTPUT_NAME "libVkLayer_XFSR"
-  POSITION_INDEPENDENT_CODE ON
-  BUILD_RPATH_USE_ORIGIN TRUE
-)
 
-set(LAYER_LIB_PATH "./libVkLayer_XFSR.so")
+if(WIN32)
+  set_target_properties(VkLayer_XFSR PROPERTIES
+    PREFIX ""
+    OUTPUT_NAME "VkLayer_XFSR"
+  )
+  target_link_libraries(VkLayer_XFSR PRIVATE user32)
+  set(LAYER_LIB_PATH ".\\\\VkLayer_XFSR.dll")
+else()
+  target_compile_options(VkLayer_XFSR PRIVATE -fvisibility=hidden)
+  target_link_libraries(VkLayer_XFSR PRIVATE ${CMAKE_DL_LIBS} stdc++)
+  # Proton/steamrt ships glibc 2.31; a host-built layer needs GLIBC_2.34+ (dlopen).
+  # Prefer pressure-vessel's host-lib overrides (same mechanism as MangoHud under /usr)
+  # so dlopen succeeds inside the container; fall back to /usr/lib on the bare host.
+  # Use classic DT_RPATH (--disable-new-dtags): Steam sets LD_LIBRARY_PATH, which
+  # would otherwise beat DT_RUNPATH and keep resolving steamrt's older libc.
+  target_link_options(VkLayer_XFSR PRIVATE
+    "LINKER:--disable-new-dtags"
+    "LINKER:-rpath,/usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu"
+    "LINKER:-rpath,/usr/lib/pressure-vessel/overrides/lib/i386-linux-gnu"
+    "LINKER:-rpath,/usr/lib"
+  )
+  set_target_properties(VkLayer_XFSR PROPERTIES
+    PREFIX ""
+    OUTPUT_NAME "libVkLayer_XFSR"
+    POSITION_INDEPENDENT_CODE ON
+    BUILD_RPATH_USE_ORIGIN TRUE
+  )
+  set(LAYER_LIB_PATH "./libVkLayer_XFSR.so")
+endif()
+
 configure_file(
   ${CMAKE_CURRENT_SOURCE_DIR}/layer/VkLayer_XFSR.json.in
   ${CMAKE_CURRENT_BINARY_DIR}/VkLayer_XFSR.json
+  @ONLY
+)
+configure_file(
+  ${CMAKE_CURRENT_SOURCE_DIR}/layer/VkLayer_EdgeScale.json.in
+  ${CMAKE_CURRENT_BINARY_DIR}/VkLayer_EdgeScale.json
   @ONLY
 )
 
@@ -302,27 +335,29 @@ if(XFSR_BUILD_BENCH)
   target_link_libraries(xfsr_load_gl PRIVATE ${GLFW3_LIBRARIES} ${CMAKE_DL_LIBS})
 endif()
 
-# OpenGL viewport remap for Zink + FSR (LD_PRELOAD from xfsr-run).
-add_library(xfsr_gl_shim SHARED gl/xfsr_gl_shim.c)
-set_target_properties(xfsr_gl_shim PROPERTIES
-  OUTPUT_NAME "xfsr_gl_shim"
-  PREFIX "lib"
-)
-target_link_libraries(xfsr_gl_shim PRIVATE ${CMAKE_DL_LIBS})
-target_compile_options(xfsr_gl_shim PRIVATE -fvisibility=hidden -Wall -Wextra)
+if(NOT WIN32)
+  # OpenGL viewport remap for Zink + FSR (LD_PRELOAD from xfsr-run).
+  add_library(xfsr_gl_shim SHARED gl/xfsr_gl_shim.c)
+  set_target_properties(xfsr_gl_shim PROPERTIES
+    OUTPUT_NAME "xfsr_gl_shim"
+    PREFIX "lib"
+  )
+  target_link_libraries(xfsr_gl_shim PRIVATE ${CMAKE_DL_LIBS})
+  target_compile_options(xfsr_gl_shim PRIVATE -fvisibility=hidden -Wall -Wextra)
 
-# User install: ~/.local/bin/xfsr-run + layer under ~/.local/{lib,share/vulkan/...}
-add_custom_target(install-xfsr-layer
-  COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/install-xfsr-run.sh
-  DEPENDS VkLayer_XFSR xfsr_gl_shim
-  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-  COMMENT "Installing xfsr-run + implicit layer to ~/.local"
-)
+  # User install: ~/.local/bin/xfsr-run + layer under ~/.local/{lib,share/vulkan/...}
+  add_custom_target(install-xfsr-layer
+    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/install-xfsr-run.sh
+    DEPENDS VkLayer_XFSR xfsr_gl_shim
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    COMMENT "Installing xfsr-run + implicit layer to ~/.local"
+  )
 
-# Release tarball: dist/xfsr-${VERSION}-linux-x86_64.tar.gz
-add_custom_target(package-xfsr
-  COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/package-xfsr.sh
-  DEPENDS VkLayer_XFSR xfsr_gl_shim
-  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-  COMMENT "Packaging xfsr-run release tarball into dist/"
-)
+  # Release tarball: dist/xfsr-${VERSION}-linux-x86_64.tar.gz
+  add_custom_target(package-xfsr
+    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/package-xfsr.sh
+    DEPENDS VkLayer_XFSR xfsr_gl_shim
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    COMMENT "Packaging xfsr-run release tarball into dist/"
+  )
+endif()

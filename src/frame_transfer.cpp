@@ -3,7 +3,27 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#if defined(_WIN32)
+#include <io.h>
+#include <malloc.h>
+#define close _close
+static inline void* alignedAlloc(size_t align, size_t size) {
+    return _aligned_malloc(size, align);
+}
+static inline void alignedFree(void* ptr) {
+    _aligned_free(ptr);
+}
+#else
 #include <unistd.h>
+static inline void* alignedAlloc(size_t align, size_t size) {
+    void* ptr = nullptr;
+    if (posix_memalign(&ptr, align, size) != 0) return nullptr;
+    return ptr;
+}
+static inline void alignedFree(void* ptr) {
+    std::free(ptr);
+}
+#endif
 
 namespace {
 
@@ -338,7 +358,7 @@ void FrameTransfer::resize(uint32_t w, uint32_t h, VkFormat fmt, uint32_t bpp) {
         destroyImportedBuffer(srcCtx, s.srcBuf, s.srcMem);
         destroyImportedBuffer(dstCtx, s.dstBuf, s.dstMem);
         if (s.hostPtr) {
-            std::free(s.hostPtr);
+            alignedFree(s.hostPtr);
             s.hostPtr = nullptr;
             s.hostBytes = 0;
         }
@@ -351,11 +371,9 @@ void FrameTransfer::resize(uint32_t w, uint32_t h, VkFormat fmt, uint32_t bpp) {
             createDmaBufPair(srcCtx, dstCtx, allocBytes, &s.srcBuf, &s.srcMem, &s.dstBuf,
                              &s.dstMem);
         } else if (backend == TransferBackend::SharedHost) {
-            void* ptr = nullptr;
-            if (posix_memalign(&ptr, static_cast<size_t>(align), static_cast<size_t>(allocBytes)) !=
-                    0 ||
-                !ptr) {
-                throw std::runtime_error("posix_memalign failed for shared host buffer");
+            void* ptr = alignedAlloc(static_cast<size_t>(align), static_cast<size_t>(allocBytes));
+            if (!ptr) {
+                throw std::runtime_error("aligned allocation failed for shared host buffer");
             }
             std::memset(ptr, 0, static_cast<size_t>(allocBytes));
             s.hostPtr = ptr;
@@ -443,7 +461,7 @@ void FrameTransfer::destroy() {
         destroyImportedBuffer(srcCtx, s.srcBuf, s.srcMem);
         destroyImportedBuffer(dstCtx, s.dstBuf, s.dstMem);
         if (s.hostPtr) {
-            std::free(s.hostPtr);
+            alignedFree(s.hostPtr);
             s.hostPtr = nullptr;
         }
         s.srcLinear.destroy();

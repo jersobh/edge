@@ -3,7 +3,10 @@
 #include <cstdlib>
 #include <string>
 #include <sys/stat.h>
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#elif defined(__linux__) || defined(__APPLE__)
 #include <dlfcn.h>
 #endif
 
@@ -27,7 +30,29 @@ inline std::string xfsrShaderDir() {
         if (e[0]) return e;
     }
 
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(_WIN32)
+    HMODULE hm = NULL;
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCSTR)&xfsrShaderDir, &hm)) {
+        char path[MAX_PATH];
+        if (GetModuleFileNameA(hm, path, sizeof(path)) > 0) {
+            std::string p(path);
+            auto slash = p.find_last_of("\\/");
+            if (slash != std::string::npos) {
+                std::string modDir = p.substr(0, slash);
+                if (dirHasShaders(modDir + "\\shaders")) return modDir + "\\shaders";
+                if (dirHasShaders(modDir + "/shaders")) return modDir + "/shaders";
+                if (dirHasShaders(modDir)) return modDir;
+            }
+        }
+    }
+    if (const char* appdata = std::getenv("LOCALAPPDATA")) {
+        if (appdata[0] && dirHasShaders(std::string(appdata) + "\\EdgeScale\\shaders")) {
+            return std::string(appdata) + "\\EdgeScale\\shaders";
+        }
+    }
+#elif defined(__linux__) || defined(__APPLE__)
     Dl_info info{};
     if (dladdr(reinterpret_cast<const void*>(&xfsrShaderDir), &info) != 0 && info.dli_fname) {
         std::string p(info.dli_fname);

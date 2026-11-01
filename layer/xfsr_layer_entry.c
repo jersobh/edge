@@ -8,7 +8,9 @@
 PFN_vkVoidFunction VKAPI_CALL xfsr_GetInstanceProcAddr(VkInstance instance, const char* pName);
 PFN_vkVoidFunction VKAPI_CALL xfsr_GetDeviceProcAddr(VkDevice device, const char* pName);
 
-#if defined(__GNUC__) && __GNUC__ >= 4
+#if defined(_WIN32)
+#define XFSR_EXPORT __declspec(dllexport)
+#elif defined(__GNUC__) && __GNUC__ >= 4
 #define XFSR_EXPORT __attribute__((visibility("default")))
 #else
 #define XFSR_EXPORT
