@@ -6,7 +6,7 @@
 
 FSR 1.0 for Linux games — wrap a title like `gamemoderun`, get more FPS by rendering lower and upscaling.
 
-**Current version:** [0.8.0](https://github.com/jersobh/xfsr/releases/tag/v0.8.0)
+**Current version:** [0.8.1](https://github.com/jersobh/xfsr/releases/tag/v0.8.1)
 
 **Roadmap:** [ROADMAP.md](ROADMAP.md) — adaptive FSR, profiles, auto-tune, dma-buf.  
 **Not in the layer:** true FSR 2/3/4 (need game motion vectors / AMD+Proton DLL upgrade — see ROADMAP §2).
@@ -247,12 +247,12 @@ Needs CMake ≥ 3.20, C++17, `glslc`, Vulkan loader. FSR1 headers: `third_party/
 
 ## Versioning
 
-- [`VERSION`](VERSION) — **0.8.0**
+- [`VERSION`](VERSION) — **0.8.1**
 - [`CHANGELOG.md`](CHANGELOG.md)
 - Tag `vX.Y.Z` → GitHub Actions builds the Linux package the install script downloads
 
 ```sh
-git tag v0.8.0 && git push origin v0.8.0
+git tag v0.8.1 && git push origin v0.8.1
 ```
 
 ## Credits
