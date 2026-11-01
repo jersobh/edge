@@ -2880,6 +2880,103 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_PresentTimingStubUnsupported(VkDevice /*devi
     return VK_ERROR_FEATURE_NOT_PRESENT;
 }
 
+// --- VK_NV_low_latency2 (Reflex) / GOOGLE display timing / AMD local dimming ---
+// CS2 enables Reflex on NVIDIA and calls these with the app-facing swapchain. With
+// dual-GPU one-way offload that is an opaque handle (0x11…) → NVIDIA ICD SIGSEGV in
+// libnvidia-glcore. Proxy handles: stub (and signal the sleep semaphore so the app
+// never waits forever). Real handles: forward to the next layer/ICD.
+struct XfsrLatencySleepInfoNV {
+    VkStructureType sType;
+    const void* pNext;
+    VkSemaphore signalSemaphore;
+    uint64_t value;
+};
+struct XfsrGetLatencyMarkerInfoNV {
+    VkStructureType sType;
+    const void* pNext;
+    uint32_t timingCount;
+    void* pTimings;
+};
+using PFN_xfsrSetLatencySleepModeNV = VkResult(VKAPI_PTR*)(VkDevice, VkSwapchainKHR, const void*);
+using PFN_xfsrLatencySleepNV = VkResult(VKAPI_PTR*)(VkDevice, VkSwapchainKHR, const void*);
+using PFN_xfsrSetLatencyMarkerNV = void(VKAPI_PTR*)(VkDevice, VkSwapchainKHR, const void*);
+using PFN_xfsrGetLatencyTimingsNV = void(VKAPI_PTR*)(VkDevice, VkSwapchainKHR, void*);
+using PFN_xfsrGetRefreshCycleDurationGOOGLE = VkResult(VKAPI_PTR*)(VkDevice, VkSwapchainKHR, void*);
+using PFN_xfsrSetLocalDimmingAMD = void(VKAPI_PTR*)(VkDevice, VkSwapchainKHR, VkBool32);
+
+template <typename T>
+T nextDevFn(VkDevice device, const char* name) {
+    DeviceData* dd = deviceDataOf(device);
+    if (!dd || !dd->gdpa) return nullptr;
+    return reinterpret_cast<T>(dd->gdpa(device, name));
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL xfsr_SetLatencySleepModeNV(VkDevice device, VkSwapchainKHR swapchain,
+                                                          const void* pInfo) {
+    if (swapchainIsProxy(swapchain)) return VK_SUCCESS;
+    auto fn = nextDevFn<PFN_xfsrSetLatencySleepModeNV>(device, "vkSetLatencySleepModeNV");
+    return fn ? fn(device, swapchain, pInfo) : VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL xfsr_LatencySleepNV(VkDevice device, VkSwapchainKHR swapchain,
+                                                   const void* pSleepInfo) {
+    if (swapchainIsProxy(swapchain)) {
+        // App waits on this timeline semaphore value — signal it from the host.
+        const auto* si = static_cast<const XfsrLatencySleepInfoNV*>(pSleepInfo);
+        if (si && si->signalSemaphore) {
+            auto sig = nextDevFn<PFN_vkSignalSemaphore>(device, "vkSignalSemaphore");
+            if (!sig) sig = nextDevFn<PFN_vkSignalSemaphore>(device, "vkSignalSemaphoreKHR");
+            if (sig) {
+                VkSemaphoreSignalInfo ssi{VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO};
+                ssi.semaphore = si->signalSemaphore;
+                ssi.value = si->value;
+                sig(device, &ssi);
+            }
+        }
+        return VK_SUCCESS;
+    }
+    auto fn = nextDevFn<PFN_xfsrLatencySleepNV>(device, "vkLatencySleepNV");
+    return fn ? fn(device, swapchain, pSleepInfo) : VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL xfsr_SetLatencyMarkerNV(VkDevice device, VkSwapchainKHR swapchain,
+                                                   const void* pInfo) {
+    if (swapchainIsProxy(swapchain)) return;
+    auto fn = nextDevFn<PFN_xfsrSetLatencyMarkerNV>(device, "vkSetLatencyMarkerNV");
+    if (fn) fn(device, swapchain, pInfo);
+}
+
+VKAPI_ATTR void VKAPI_CALL xfsr_GetLatencyTimingsNV(VkDevice device, VkSwapchainKHR swapchain,
+                                                    void* pInfo) {
+    if (swapchainIsProxy(swapchain)) {
+        if (pInfo) static_cast<XfsrGetLatencyMarkerInfoNV*>(pInfo)->timingCount = 0;
+        return;
+    }
+    auto fn = nextDevFn<PFN_xfsrGetLatencyTimingsNV>(device, "vkGetLatencyTimingsNV");
+    if (fn) fn(device, swapchain, pInfo);
+    else if (pInfo) static_cast<XfsrGetLatencyMarkerInfoNV*>(pInfo)->timingCount = 0;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL xfsr_GetRefreshCycleDurationGOOGLE(VkDevice device,
+                                                                  VkSwapchainKHR swapchain,
+                                                                  void* pDisplayTimingProperties) {
+    if (swapchainIsProxy(swapchain)) {
+        if (pDisplayTimingProperties)
+            *static_cast<uint64_t*>(pDisplayTimingProperties) = 16666667ull; // ~60 Hz
+        return VK_SUCCESS;
+    }
+    auto fn = nextDevFn<PFN_xfsrGetRefreshCycleDurationGOOGLE>(device,
+                                                              "vkGetRefreshCycleDurationGOOGLE");
+    return fn ? fn(device, swapchain, pDisplayTimingProperties) : VK_ERROR_FEATURE_NOT_PRESENT;
+}
+
+VKAPI_ATTR void VKAPI_CALL xfsr_SetLocalDimmingAMD(VkDevice device, VkSwapchainKHR swapchain,
+                                                   VkBool32 enable) {
+    if (swapchainIsProxy(swapchain)) return;
+    auto fn = nextDevFn<PFN_xfsrSetLocalDimmingAMD>(device, "vkSetLocalDimmingAMD");
+    if (fn) fn(device, swapchain, enable);
+}
+
 VKAPI_ATTR void VKAPI_CALL xfsr_SetHdrMetadataEXT(VkDevice device, uint32_t swapchainCount,
                                                   const VkSwapchainKHR* pSwapchains,
                                                   const VkHdrMetadataEXT* pMetadata) {
@@ -3737,6 +3834,26 @@ PFN_vkVoidFunction resolveDevice(const char* pName) {
         return reinterpret_cast<PFN_vkVoidFunction>(xfsr_GetSwapchainCounterEXT);
     if (std::strcmp(pName, "vkGetPastPresentationTimingGOOGLE") == 0)
         return reinterpret_cast<PFN_vkVoidFunction>(xfsr_GetPastPresentationTimingGOOGLE);
+    // Swapchain-taking extension entry points — never let a proxy handle reach the ICD.
+    // xfsr_GetDeviceProcAddr returns NULL when the next layer/ICD lacks them.
+    {
+        struct Hook {
+            const char* name;
+            PFN_vkVoidFunction fn;
+        };
+        static const Hook kHooks[] = {
+            {"vkSetLatencySleepModeNV", reinterpret_cast<PFN_vkVoidFunction>(xfsr_SetLatencySleepModeNV)},
+            {"vkLatencySleepNV", reinterpret_cast<PFN_vkVoidFunction>(xfsr_LatencySleepNV)},
+            {"vkSetLatencyMarkerNV", reinterpret_cast<PFN_vkVoidFunction>(xfsr_SetLatencyMarkerNV)},
+            {"vkGetLatencyTimingsNV", reinterpret_cast<PFN_vkVoidFunction>(xfsr_GetLatencyTimingsNV)},
+            {"vkGetRefreshCycleDurationGOOGLE",
+             reinterpret_cast<PFN_vkVoidFunction>(xfsr_GetRefreshCycleDurationGOOGLE)},
+            {"vkSetLocalDimmingAMD", reinterpret_cast<PFN_vkVoidFunction>(xfsr_SetLocalDimmingAMD)},
+        };
+        for (const auto& h : kHooks) {
+            if (std::strcmp(pName, h.name) == 0) return h.fn;
+        }
+    }
     // Timing helpers Zink probes — stub (never forward opaque proxy handles).
     if (pName && (std::strcmp(pName, "vkGetPastPresentationTimingEXT") == 0 ||
                   std::strcmp(pName, "vkSetSwapchainPresentTimingQueueSizeEXT") == 0 ||
@@ -3786,7 +3903,17 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL xfsr_GetDeviceProcAddr(VkDevice device,
     // Only intercept swapchain/present on the app's tracked dGPU device.
     // Companion iGPU must get real ICD entry points (otherwise Presenter recurses into us).
     if (dd) {
-        if (auto f = resolveDevice(pName)) return f;
+        if (auto f = resolveDevice(pName)) {
+            // Optional extension hooks: keep NULL when the driver doesn't expose them.
+            if (pName && dd->gdpa &&
+                (std::strstr(pName, "LatencyNV") || std::strstr(pName, "LatencySleep") ||
+                 std::strstr(pName, "LatencyMarker") || std::strstr(pName, "LatencyTimings") ||
+                 std::strcmp(pName, "vkGetRefreshCycleDurationGOOGLE") == 0 ||
+                 std::strcmp(pName, "vkSetLocalDimmingAMD") == 0) &&
+                dd->gdpa(device, pName) == nullptr)
+                return nullptr;
+            return f;
+        }
         if (dd->gdpa) return dd->gdpa(device, pName);
     }
     if (companionGdpa) return companionGdpa(device, pName);

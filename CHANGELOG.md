@@ -13,6 +13,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   - Direct-to-swapchain stores no longer double-swizzle BGRA swapchains (the storage view already uses the swapchain format), which swapped red and blue and gave a blue tint.
   - The contrast S-curve and saturation boost ("beautify") is now opt-in with `XFSR_EDGE_BEAUTIFY=1`, so by default edge leaves colors unchanged.
 - **Freeze on quality/scale change with edge**: `FrameTransfer::resetPipeline` waits on its own slot fences (2 s timeout) instead of `vkDeviceWaitIdle` on the app device.
+- **CS2 crash on startup with iGPU offload (NVIDIA)**: CS2 enables Reflex (`VK_NV_low_latency2`) and passed the opaque one-way swapchain handle straight to the NVIDIA ICD (SIGSEGV in `libnvidia-glcore`). The layer now intercepts `vkSetLatencySleepModeNV`, `vkLatencySleepNV` (signals the sleep semaphore), `vkSetLatencyMarkerNV`, `vkGetLatencyTimingsNV`, `vkGetRefreshCycleDurationGOOGLE` and `vkSetLocalDimmingAMD`, stubbing them for proxy handles and forwarding real ones.
 - **`--preset` ignored at startup**: when caps-shrink is on, the app's swapchain size (e.g. CoD4 starting windowed at 1280x720 on a 1080p display) no longer overwrites the chosen preset/scale (it flipped `performance` to `quality`). Ratio-derived scale is only used with `XFSR_CAPS_SHRINK=0`.
 
 ## [0.7.0] — 2026-10-31
