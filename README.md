@@ -7,7 +7,8 @@
 <p align="center">
   <a href="https://github.com/jersobh/edge/releases/latest"><img src="https://img.shields.io/github/v/release/jersobh/edge?display_name=tag&sort=semver" alt="Release" /></a>
   <a href="https://github.com/jersobh/edge/actions/workflows/release.yml"><img src="https://github.com/jersobh/edge/actions/workflows/release.yml/badge.svg" alt="Build" /></a>
-  <a href="https://github.com/jersobh/edge/releases"><img src="https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20x86__64-lightgrey.svg" alt="Platform" /></a>
+  <a href="https://github.com/jersobh/edge/releases"><img src="https://img.shields.io/badge/Linux-x86__64-FCC624?logo=linux&logoColor=black" alt="Linux" /></a>
+  <a href="https://github.com/jersobh/edge/releases"><img src="https://img.shields.io/badge/Windows-x86__64-0078D6?logo=windows&logoColor=white" alt="Windows" /></a>
 </p>
 
 **EdgeScale (`edgerun`)** — high-performance in-process GPU upscaling and companion iGPU offload for Vulkan games (Linux native, Proton/Wine, OpenGL via Zink, and Windows native Vulkan / DXVK).
