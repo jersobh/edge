@@ -7,6 +7,13 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [0.8.1] — 2026-11-01
 
+### Changed
+
+- **Rebranded to EdgeScale (`edgerun`)**:
+  - The project is now **EdgeScale**, putting the custom Edge reconstruction engine and in-process scaling pipeline front and center.
+  - The primary CLI runner is now **`edgerun`** (e.g. `edgerun --preset performance %command%`).
+  - Full backward compatibility: `xfsr-run` is maintained as a direct alias/symlink, and all `XFSR_*` environment variables and configs (`~/.config/xfsr/profiles.conf`) continue to work alongside new `EDGESCALE_*` / `~/.config/edgescale/` paths.
+
 ### Fixed
 
 - **CS2 crash on startup with iGPU offload (NVIDIA Reflex)**: CS2 enables Reflex (`VK_NV_low_latency2`) and passed the opaque one-way swapchain handle straight to the NVIDIA ICD (causing a `libnvidia-glcore` SIGSEGV). The layer now intercepts `vkSetLatencySleepModeNV`, `vkLatencySleepNV` (signals the sleep timeline semaphore), `vkSetLatencyMarkerNV`, `vkGetLatencyTimingsNV`, `vkGetRefreshCycleDurationGOOGLE` and `vkSetLocalDimmingAMD`, stubbing them for proxy handles and forwarding real ones.

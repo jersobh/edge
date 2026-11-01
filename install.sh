@@ -86,12 +86,20 @@ fi
 
 echo ">>> Installing into ${PREFIX}"
 mkdir -p "$BIN_DIR" "$LIB_DIR" "$LAYER_DIR" "$SHADER_DIR"
-install -m 755 "${STAGE}/bin/xfsr-run" "${BIN_DIR}/xfsr-run"
+if [ -f "${STAGE}/bin/edgerun" ]; then
+  install -m 755 "${STAGE}/bin/edgerun" "${BIN_DIR}/edgerun"
+  ln -sf edgerun "${BIN_DIR}/xfsr-run"
+else
+  install -m 755 "${STAGE}/bin/xfsr-run" "${BIN_DIR}/xfsr-run"
+  ln -sf xfsr-run "${BIN_DIR}/edgerun"
+fi
 if [ -f "${STAGE}/bin/xfsr-auto-tune" ]; then
   install -m 755 "${STAGE}/bin/xfsr-auto-tune" "${BIN_DIR}/xfsr-auto-tune"
+  ln -sf xfsr-auto-tune "${BIN_DIR}/edgescale-auto-tune"
 fi
 if [ -f "${STAGE}/bin/xfsr-gamescope-focus" ]; then
   install -m 755 "${STAGE}/bin/xfsr-gamescope-focus" "${BIN_DIR}/xfsr-gamescope-focus"
+  ln -sf xfsr-gamescope-focus "${BIN_DIR}/edgescale-gamescope-focus"
 fi
 install -m 755 "${STAGE}/lib/libVkLayer_XFSR.so" \
   "${LIB_DIR}/libVkLayer_XFSR.so"

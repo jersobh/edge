@@ -1290,23 +1290,23 @@ void initFromEnv() {
         g_rt.targetFps = v;
     }
 
-    const char* cpath = std::getenv("XFSR_CONTROL");
+    const char* cpath = xfsrEnv("XFSR_CONTROL", "CROSSVULKAN_CONTROL");
     if (cpath && cpath[0]) {
         std::snprintf(g_rt.controlPath, sizeof(g_rt.controlPath), "%s", cpath);
     } else {
         const char* rt = std::getenv("XDG_RUNTIME_DIR");
         if (rt && rt[0])
-            std::snprintf(g_rt.controlPath, sizeof(g_rt.controlPath), "%s/xfsr-control", rt);
+            std::snprintf(g_rt.controlPath, sizeof(g_rt.controlPath), "%s/edgescale-control", rt);
         else
-            std::snprintf(g_rt.controlPath, sizeof(g_rt.controlPath), "/tmp/xfsr-control-%d",
+            std::snprintf(g_rt.controlPath, sizeof(g_rt.controlPath), "/tmp/edgescale-control-%d",
                           static_cast<int>(getpid()));
     }
     {
         const char* rt = std::getenv("XDG_RUNTIME_DIR");
         if (rt && rt[0])
-            std::snprintf(g_rt.statusPath, sizeof(g_rt.statusPath), "%s/xfsr-status", rt);
+            std::snprintf(g_rt.statusPath, sizeof(g_rt.statusPath), "%s/edgescale-status", rt);
         else
-            std::snprintf(g_rt.statusPath, sizeof(g_rt.statusPath), "/tmp/xfsr-status-%d",
+            std::snprintf(g_rt.statusPath, sizeof(g_rt.statusPath), "/tmp/edgescale-status-%d",
                           static_cast<int>(getpid()));
     }
 
@@ -1320,6 +1320,15 @@ void initFromEnv() {
                      g_rt.overlayPinned ? " [overlay pinned]" : "", g_rt.controlPath);
         // Touch the control file so the path always exists for scripting.
         std::ofstream touch(g_rt.controlPath, std::ios::app);
+        const char* rt = std::getenv("XDG_RUNTIME_DIR");
+        if (rt && rt[0]) {
+            char legacyCtrl[512];
+            std::snprintf(legacyCtrl, sizeof(legacyCtrl), "%s/xfsr-control", rt);
+            (void)::symlink(g_rt.controlPath, legacyCtrl);
+            char legacyStatus[512];
+            std::snprintf(legacyStatus, sizeof(legacyStatus), "%s/xfsr-status", rt);
+            (void)::symlink(g_rt.statusPath, legacyStatus);
+        }
     }
     if (g_rt.adaptive && !g_rt.loggedAdaptive) {
         g_rt.loggedAdaptive = true;

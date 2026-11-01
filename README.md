@@ -1,25 +1,40 @@
-# xfsr
+# EdgeScale
 
 [![Release](https://img.shields.io/github/v/release/jersobh/xfsr?display_name=tag&sort=semver)](https://github.com/jersobh/xfsr/releases/latest)
 [![Build](https://github.com/jersobh/xfsr/actions/workflows/release.yml/badge.svg)](https://github.com/jersobh/xfsr/actions/workflows/release.yml)
 [![Platform](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)](https://github.com/jersobh/xfsr/releases)
 
-FSR 1.0 for Linux games — wrap a title like `gamemoderun`, get more FPS by rendering lower and upscaling.
+**EdgeScale (`edgerun`)** — high-performance in-process GPU upscaling and companion iGPU offload for Linux games (native Vulkan, Proton/Wine, and OpenGL).
 
-**Current version:** [0.8.1](https://github.com/jersobh/xfsr/releases/tag/v0.8.1)
+Wrap your game launch in Steam with `edgerun %command%` to render lower and reconstruct crisp native resolution frames with near-zero latency.
 
-**Roadmap:** [ROADMAP.md](ROADMAP.md) — adaptive FSR, profiles, auto-tune, dma-buf.  
-**Not in the layer:** true FSR 2/3/4 (need game motion vectors / AMD+Proton DLL upgrade — see ROADMAP §2).
+**Current version:** [0.8.1](https://github.com/jersobh/xfsr/releases/tag/v0.8.1)  
+*(Formerly known as `xfsr`; `xfsr-run` is preserved as an alias for full backward compatibility).*
+
+**Roadmap:** [ROADMAP.md](ROADMAP.md) — adaptive scaling, profiles, auto-tune, dma-buf.
 
 ## What it does
 
-Games spend most of their time drawing each frame. **xfsr** asks the game to draw at a smaller resolution (for example 960×540 instead of 1920×1080), then upscales the image to your screen with **FSR 1.0**, **NIS-style**, or a cheap **linear blit**.
+Games spend most of their time rasterizing each frame. **EdgeScale** asks the game to draw at a lower internal resolution (e.g. 960×540 or 1280×720 instead of 1920×1080), then reconstructs the image to your display using:
+- **`edge` (Default / Recommended):** High-occupancy sub-pixel edge tangent reconstruction, anti-ringing Catmull-Rom cubic filtering, and Contrast-Adaptive Sharpening (CAS).
+- **`fsr1`:** AMD FidelityFX Super Resolution 1.0 (EASU + optional RCAS).
+- **`nis`:** NVIDIA Image Scaling compute shader.
+- **`blit`:** Pure linear blit at preset scale.
 
-You do **not** need the game to support FSR. xfsr hooks in through a **Vulkan layer** (same idea as MangoHud): it sits between the game and the GPU driver and rewrites the swapchain.
+You do **not** need the game to have built-in upscaling. EdgeScale hooks in through an in-process **Vulkan layer**: it sits directly inside the game's swapchain and intercepts frames with zero capture lag.
 
-**Works with:** native Vulkan, Proton/DXVK (64-bit & 32-bit via automatic `PROTON_USE_WOW64=1`), and OpenGL via automatic Zink detection (with an `LD_PRELOAD` shim that remaps viewports, scissors, FBO blits, and SDL drawable queries).  
-**Modes:** Dual-GPU iGPU offload is enabled by default (`--offload` / `XFSR_OFFLOAD=1` with one-way iGPU presentation and automatic fused round-trip fallback), `--hybrid` (dGPU render + iGPU `edge` upscale + one-way present), or `--no-offload` (same-GPU).  
-**Tested on:** hybrid laptops (e.g. NVIDIA/AMD dGPU + AMD Vega iGPU).
+**Works with:** Native Vulkan, Proton/DXVK (64-bit and 32-bit via automatic `PROTON_USE_WOW64=1`), and OpenGL via automatic Zink detection (with an `LD_PRELOAD` shim that remaps viewports, scissors, FBO blits, and SDL drawable queries).  
+**Modes:** Dual-GPU iGPU offload by default (`--offload` with one-way iGPU presentation or fused round-trip fallback), `--hybrid` (dGPU render + iGPU `edge` upscale + one-way present), or `--no-offload` (same-GPU).  
+**Tested on:** Hybrid laptops (e.g. NVIDIA dGPU + AMD Vega iGPU) and discrete cards.
+
+### Quick Steam Launch Options
+
+```text
+edgerun --preset performance %command%
+edgerun --hybrid --preset performance %command%
+edgerun --any --preset performance --gamescope-fs %command%
+```
+*(You can also continue using `xfsr-run` interchangeably).*
 
 ### Max FPS on hybrid NVIDIA + AMD (e.g. GTX 1650 + Vega)
 
@@ -75,27 +90,27 @@ Presets control how hard it pushes:
 curl -fsSL https://raw.githubusercontent.com/jersobh/xfsr/main/install.sh | sh
 ```
 
-Installs into `~/.local` (`xfsr-run`, Vulkan layer, shaders). Put `~/.local/bin` on your `PATH` if it isn’t already.
+Installs into `~/.local` (`edgerun`, `xfsr-run` alias, Vulkan layer, shaders). Put `~/.local/bin` on your `PATH` if it isn’t already.
 
 ## Steam
 
 **Any Steam / Proton / DXVK / Source 2 title** (recommended; needed for Village):
 
 ```text
-xfsr-run --any --preset quality --upscaler edge --gamescope-fs %command%
+edgerun --any --preset quality --upscaler edge --gamescope-fs %command%
 ```
 
-**Layer-only** (when `xfsr-run --check` shows `proxy*` and the game honors shrink):
+**Layer-only** (when `edgerun --check` shows `proxy*` and the game honors shrink):
 
 ```text
-xfsr-run --overlay --upscaler edge --preset ultra --no-rcas --no-offload %command%
+edgerun --overlay --upscaler edge --preset performance %command%
 ```
 
-Do **not** add `--zink` for native Vulkan. Prefer same-GPU over `--offload` for peak FPS.
+Do **not** add `--zink` for native Vulkan.
 
-You should see `xfsr-run: layer …` then **`[xfsr] layer active:`** (and later `force-scale` / `proxy ready` / `hotkeys:`) in the Steam console. If Mega Man / Proton never prints `[xfsr]`, the layer `.so` failed to load inside steamrt — reinstall from this tree (`./scripts/install-xfsr-run.sh`; the layer is linked with a pressure-vessel host-lib RPATH), fully quit Steam, clear leftover env, relaunch Steam, and retry.
+You should see `edgerun: layer …` then **`[xfsr] layer active:`** (and later `force-scale` / `proxy ready` / `hotkeys:`) in the Steam console. If Mega Man / Proton never prints `[xfsr]`, the layer `.so` failed to load inside steamrt — reinstall from this tree (`./scripts/install-edgerun.sh`; the layer is linked with a pressure-vessel host-lib RPATH), fully quit Steam, clear leftover env, relaunch Steam, and retry.
 
-**32-bit Windows titles** (CoD4:MW, many 2000s D3D9/OpenGL games): the layer is **x86_64**. `xfsr-run` automatically exports `PROTON_USE_WOW64=1` for Proton launches so 32-bit Windows games run under 64-bit Wine Wow64 and load `libVkLayer_XFSR.so`:
+**32-bit Windows titles** (CoD4:MW, many 2000s D3D9/OpenGL games): the layer is **x86_64**. `edgerun` automatically exports `PROTON_USE_WOW64=1` for Proton launches so 32-bit Windows games run under 64-bit Wine Wow64 and load `libVkLayer_XFSR.so`:
 
 ```text
 gamemoderun xfsr-run --preset performance --overlay --no-rcas %command%

@@ -20,20 +20,23 @@ mkdir -p "$PREFIX/bin" "$PREFIX/lib" \
   "$PREFIX/share/vulkan/implicit_layer.d" \
   "$PREFIX/share/xfsr/shaders"
 
-install -m 755 "$ROOT/scripts/xfsr-run" "$PREFIX/bin/xfsr-run"
+install -m 755 "$ROOT/scripts/edgerun" "$PREFIX/bin/edgerun"
+ln -sf edgerun "$PREFIX/bin/xfsr-run"
 install -m 755 "$ROOT/scripts/xfsr-auto-tune" "$PREFIX/bin/xfsr-auto-tune"
+ln -sf xfsr-auto-tune "$PREFIX/bin/edgescale-auto-tune"
 install -m 755 "$ROOT/scripts/xfsr-gamescope-focus" "$PREFIX/bin/xfsr-gamescope-focus"
+ln -sf xfsr-gamescope-focus "$PREFIX/bin/edgescale-gamescope-focus"
 install -m 755 "$BUILD/libVkLayer_XFSR.so" "$PREFIX/lib/libVkLayer_XFSR.so"
 install -m 755 "$BUILD/libxfsr_gl_shim.so" "$PREFIX/lib/libxfsr_gl_shim.so"
 if [[ -f "$ROOT/share/xfsr/profiles.example.conf" ]]; then
   install -m 644 "$ROOT/share/xfsr/profiles.example.conf" \
     "$PREFIX/share/xfsr/profiles.example.conf"
 fi
-mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/xfsr"
-if [[ ! -f "${XDG_CONFIG_HOME:-$HOME/.config}/xfsr/profiles.conf" \
+mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/edgescale" "${XDG_CONFIG_HOME:-$HOME/.config}/xfsr"
+if [[ ! -f "${XDG_CONFIG_HOME:-$HOME/.config}/edgescale/profiles.conf" \
       && -f "$ROOT/share/xfsr/profiles.example.conf" ]]; then
   install -m 644 "$ROOT/share/xfsr/profiles.example.conf" \
-    "${XDG_CONFIG_HOME:-$HOME/.config}/xfsr/profiles.conf"
+    "${XDG_CONFIG_HOME:-$HOME/.config}/edgescale/profiles.conf"
 fi
 
 # Drop pre-rename layer artifacts so the loader does not load two XFSR layers.
@@ -69,20 +72,19 @@ print("glibc deps:", ", ".join(vers) if vers else "(none)")
 PY
 
 echo
-echo "Installed:"
-echo "  $PREFIX/bin/xfsr-run"
-echo "  $PREFIX/bin/xfsr-auto-tune"
+echo "Installed EdgeScale:"
+echo "  $PREFIX/bin/edgerun  (alias: xfsr-run)"
 echo "  $PREFIX/lib/libVkLayer_XFSR.so"
 echo "  $PREFIX/lib/libxfsr_gl_shim.so"
 echo "  $PREFIX/share/vulkan/implicit_layer.d/VkLayer_XFSR.json"
 echo "  $PREFIX/share/xfsr/shaders/"
-echo "  $PREFIX/share/xfsr/profiles.example.conf"
 echo
-if ! command -v xfsr-run >/dev/null 2>&1; then
+if ! command -v edgerun >/dev/null 2>&1; then
   echo "Add to PATH if needed:  export PATH=\"$PREFIX/bin:\$PATH\""
 fi
-echo "Profiles:             ~/.config/xfsr/profiles.conf  (auto-created from example)"
-echo "Auto-tune:            xfsr-auto-tune --apply"
+echo "Profiles:             ~/.config/edgescale/profiles.conf"
+echo "Auto-tune:            edgescale-auto-tune --apply"
 echo "Roadmap:              $ROOT/ROADMAP.md"
-echo "Steam launch option:  xfsr-run --mangohud --preset performance --no-rcas %command%"
-echo "Smoke test:           xfsr-run --print true"
+echo "Steam launch option:  edgerun --preset performance %command%"
+echo "                      (or: xfsr-run --preset performance %command%)"
+echo "Smoke test:           edgerun --print true"

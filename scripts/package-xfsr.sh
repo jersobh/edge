@@ -24,9 +24,12 @@ cmake --build "$BUILD" -j"$(nproc)" --target VkLayer_XFSR xfsr_gl_shim
 rm -rf "$STAGE"
 mkdir -p "$STAGE/bin" "$STAGE/lib" "$STAGE/share/vulkan/implicit_layer.d" "$STAGE/share/xfsr/shaders"
 
-install -m 755 "$ROOT/scripts/xfsr-run" "$STAGE/bin/xfsr-run"
+install -m 755 "$ROOT/scripts/edgerun" "$STAGE/bin/edgerun"
+ln -sf edgerun "$STAGE/bin/xfsr-run"
 install -m 755 "$ROOT/scripts/xfsr-auto-tune" "$STAGE/bin/xfsr-auto-tune"
+ln -sf xfsr-auto-tune "$STAGE/bin/edgescale-auto-tune"
 install -m 755 "$ROOT/scripts/xfsr-gamescope-focus" "$STAGE/bin/xfsr-gamescope-focus"
+ln -sf xfsr-gamescope-focus "$STAGE/bin/edgescale-gamescope-focus"
 install -m 755 "$BUILD/libVkLayer_XFSR.so" "$STAGE/lib/libVkLayer_XFSR.so"
 install -m 755 "$BUILD/libxfsr_gl_shim.so" "$STAGE/lib/libxfsr_gl_shim.so"
 if [[ -f "$ROOT/share/xfsr/profiles.example.conf" ]]; then
