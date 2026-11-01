@@ -14,7 +14,7 @@ if %errorlevel% neq 0 (
 where glslc >nul 2>&1
 if %errorlevel% neq 0 (
     if defined VULKAN_SDK (
-        set "PATH=%VULKAN_SDK%\bin;%PATH%"
+        set "PATH=%VULKAN_SDK%\Bin;%VULKAN_SDK%\bin;%PATH%"
     ) else (
         echo [ERROR] glslc not found. Please install the Vulkan SDK.
         exit /b 1

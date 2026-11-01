@@ -10,7 +10,6 @@ case "$ARCH" in
   aarch64|arm64) ARCH=aarch64 ;;
 esac
 NAME="edgescale-${VERSION}-linux-${ARCH}"
-LEGACY_NAME="xfsr-${VERSION}-linux-${ARCH}"
 BUILD="${XFSR_BUILD:-$ROOT/build-release}"
 STAGE="${XFSR_STAGE:-$ROOT/dist/.stage/$NAME}"
 OUT_DIR="${XFSR_DIST:-$ROOT/dist}"
@@ -137,9 +136,5 @@ rm -rf "${ROOT}/dist/.stage"
 # Convenience copy without version (local dist/)
 cp -f "$TAR" "$OUT_DIR/edgescale-linux-${ARCH}.tar.gz"
 
-# Backward compatibility copies for legacy xfsr names
-cp -f "$TAR" "$OUT_DIR/${LEGACY_NAME}.tar.gz"
-cp -f "$TAR" "$OUT_DIR/xfsr-linux-${ARCH}.tar.gz"
-
-ls -lh "$TAR" "$OUT_DIR/edgescale-linux-${ARCH}.tar.gz" "$OUT_DIR/${LEGACY_NAME}.tar.gz" "$OUT_DIR/xfsr-linux-${ARCH}.tar.gz"
+ls -lh "$TAR" "$OUT_DIR/edgescale-linux-${ARCH}.tar.gz"
 echo "OK $TAR"
