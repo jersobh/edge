@@ -105,22 +105,43 @@ Installs into `~/.local` (`edgerun`, `xfsr-run` alias, Vulkan layer, shaders). P
 
 ### Windows (Native Vulkan Layer)
 
-1. Download the latest `edgescale-windows-x86_64.zip` from [Releases](https://github.com/jersobh/edge/releases/latest).
+#### Installation
+1. Download `edgescale-windows-x86_64.zip` from [Releases](https://github.com/jersobh/edge/releases/latest).
 2. Extract the archive and double-click `install-windows.bat`.  
-   *(Installs to `%LOCALAPPDATA%\EdgeScale` and registers `VkLayer_EdgeScale.json` in `HKCU\Software\Khronos\Vulkan\ImplicitLayers`)*.
-3. Launch your game or Steam with environment variable:
-   ```cmd
-   set ENABLE_EDGESCALE=1
-   ```
-   Or in Steam Game Launch Options (Windows):
-   ```cmd
-   cmd /c "set ENABLE_EDGESCALE=1 && %command%"
-   ```
-4. Control presets and modes live in-game using hotkeys:
-   - **F1**: Cycle preset (`quality` &rarr; `balanced` &rarr; `performance` &rarr; `ultra`)
-   - **F2**: Toggle RCAS / Edge quality vs perf mode
-   - **F3**: Cycle upscaler (`edge` &rarr; `fsr1` &rarr; `nis` &rarr; `blit`)
-   - **F10**: Toggle HUD overlay pinning
+   *(Copies the layer DLL and shaders to `%LOCALAPPDATA%\EdgeScale` and registers `VkLayer_EdgeScale.json` in `HKCU\Software\Khronos\Vulkan\ImplicitLayers`)*.
+
+#### Enabling EdgeScale
+- **In Steam (Windows):** Right-click game &rarr; **Properties** &rarr; **Launch Options**:
+  ```cmd
+  cmd /c "set ENABLE_EDGESCALE=1 && %command%"
+  ```
+- **From Command Prompt (CMD):**
+  ```cmd
+  set ENABLE_EDGESCALE=1
+  game.exe
+  ```
+- **From PowerShell:**
+  ```powershell
+  $env:ENABLE_EDGESCALE=1
+  .\game.exe
+  ```
+
+#### In-Game Hotkeys
+Control upscaling in real time without relaunching:
+- **F1**: Cycle scaling preset (`quality` &rarr; `balanced` &rarr; `performance` &rarr; `ultra`)
+- **F2**: Toggle RCAS sharpening or Edge quality/perf mode
+- **F3**: Cycle upscaler algorithm (`edge` &rarr; `fsr1` &rarr; `nis` &rarr; `blit`)
+- **F10**: Toggle HUD overlay pinning
+
+#### Compatibility on Windows
+- **Native Vulkan Games:** DOOM Eternal, Baldur's Gate 3 (Vulkan), No Man's Sky, Red Dead Redemption 2 (Vulkan mode), Rainbow Six Siege (Vulkan), etc.
+- **DirectX Games via DXVK:** Drop DXVK (`dxgi.dll`, `d3d11.dll`, or `d3d9.dll`) into the game folder; EdgeScale intercepts the resulting Vulkan swapchain with near-zero latency.
+
+#### Uninstalling
+Double-click `uninstall-windows.bat` inside the release folder or run:
+```cmd
+reg delete "HKCU\Software\Khronos\Vulkan\ImplicitLayers" /v "%LOCALAPPDATA%\EdgeScale\VkLayer_EdgeScale.json" /f
+```
 
 ## Steam
 
