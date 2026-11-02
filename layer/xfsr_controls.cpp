@@ -3,6 +3,7 @@
 #include "common.hpp"
 
 #if !defined(_WIN32)
+#include <cerrno>
 #include <dlfcn.h>
 #include <elf.h>
 #include <fcntl.h>
@@ -1472,10 +1473,14 @@ void initFromEnv() {
         if (rt && rt[0]) {
             char legacyCtrl[512];
             std::snprintf(legacyCtrl, sizeof(legacyCtrl), "%s/xfsr-control", rt);
-            (void)::symlink(g_rt.controlPath, legacyCtrl);
+            if (::symlink(g_rt.controlPath, legacyCtrl) != 0 && errno != EEXIST) {
+                /* best-effort legacy path */
+            }
             char legacyStatus[512];
             std::snprintf(legacyStatus, sizeof(legacyStatus), "%s/xfsr-status", rt);
-            (void)::symlink(g_rt.statusPath, legacyStatus);
+            if (::symlink(g_rt.statusPath, legacyStatus) != 0 && errno != EEXIST) {
+                /* best-effort legacy path */
+            }
         }
 #endif
     }

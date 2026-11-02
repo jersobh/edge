@@ -347,7 +347,7 @@ cmake --build build -j --target VkLayer_XFSR
 ./scripts/package-appimage.sh          # → dist/EdgeScale-*.AppImage
 ```
 
-Needs CMake ≥ 3.20, C++17, `glslc`, Vulkan loader. AppImage packaging also needs `curl` (to fetch `appimagetool`).
+Needs CMake ≥ 3.20, C++17, `glslc`, Vulkan loader, and `libx11-dev` (GL shim X11 hooks). AppImage packaging also needs `curl` (to fetch `appimagetool`).
 
 ## Versioning
 
