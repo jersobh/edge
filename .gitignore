@@ -11,5 +11,6 @@ compile_commands.json
 bench.csv
 *.spv
 .cache/
+.cursor/
 *.log
 *.log2
