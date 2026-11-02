@@ -1,6 +1,8 @@
 @echo off
 setlocal enabledelayedexpansion
 
+cd /d "%~dp0.."
+
 echo ============================================
 echo   EdgeScale Windows Build
 echo ============================================
@@ -71,11 +73,17 @@ where iscc >nul 2>&1 && set "ISCC_EXE=iscc"
 if not defined ISCC_EXE if exist "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" set "ISCC_EXE=C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
 if not defined ISCC_EXE if exist "C:\Program Files\Inno Setup 6\ISCC.exe" set "ISCC_EXE=C:\Program Files\Inno Setup 6\ISCC.exe"
 
-if defined ISCC_EXE (
+if defined ISCC_EXE if "%SKIP_INNO%"=="" (
     echo [Optional] Building EdgeScale-Setup.exe with Inno Setup...
-    "%ISCC_EXE%" /DSourceDir="%DIST_DIR%" /DOutputDir="dist" packaging\windows\edgescale.iss
-    if %errorlevel% equ 0 (
+    set "APP_VERSION=0.9.0"
+    if exist "VERSION" set /p APP_VERSION=<VERSION
+    "%ISCC_EXE%" "/DMyAppVersion=!APP_VERSION!" "/DSourceDir=%CD%\%DIST_DIR%" "/DOutputDir=%CD%\dist" packaging\windows\edgescale.iss
+    if !errorlevel! equ 0 (
         echo   Installer generated in dist\
+        if exist "dist\EdgeScale-!APP_VERSION!-Setup.exe" copy /y "dist\EdgeScale-!APP_VERSION!-Setup.exe" "dist\EdgeScale-Setup.exe" >nul
+    ) else (
+        echo [ERROR] Inno Setup compilation failed!
+        exit /b !errorlevel!
     )
 )
 
@@ -83,4 +91,5 @@ echo ============================================
 echo   Build completed successfully!
 echo   Output in: %DIST_DIR%
 echo ============================================
+exit /b 0
 
