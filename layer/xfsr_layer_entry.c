@@ -3,30 +3,40 @@
 #define VK_NO_PROTOTYPES
 #endif
 #include <vulkan/vulkan.h>
-#include <vulkan/vk_layer.h>
-
-PFN_vkVoidFunction VKAPI_CALL xfsr_GetInstanceProcAddr(VkInstance instance, const char* pName);
-PFN_vkVoidFunction VKAPI_CALL xfsr_GetDeviceProcAddr(VkDevice device, const char* pName);
 
 #if defined(_WIN32)
 #define XFSR_EXPORT __declspec(dllexport)
+#undef VKAPI_ATTR
+#define VKAPI_ATTR __declspec(dllexport)
+#ifndef VK_LAYER_EXPORT
+#define VK_LAYER_EXPORT __declspec(dllexport)
+#endif
 #elif defined(__GNUC__) && __GNUC__ >= 4
 #define XFSR_EXPORT __attribute__((visibility("default")))
 #else
 #define XFSR_EXPORT
 #endif
 
-XFSR_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
+#include <vulkan/vk_layer.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+PFN_vkVoidFunction VKAPI_CALL xfsr_GetInstanceProcAddr(VkInstance instance, const char* pName);
+PFN_vkVoidFunction VKAPI_CALL xfsr_GetDeviceProcAddr(VkDevice device, const char* pName);
+
+XFSR_EXPORT PFN_vkVoidFunction VKAPI_CALL
 vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
     return xfsr_GetInstanceProcAddr(instance, pName);
 }
 
-XFSR_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
+XFSR_EXPORT PFN_vkVoidFunction VKAPI_CALL
 vkGetDeviceProcAddr(VkDevice device, const char* pName) {
     return xfsr_GetDeviceProcAddr(device, pName);
 }
 
-XFSR_EXPORT VKAPI_ATTR VkResult VKAPI_CALL
+XFSR_EXPORT VkResult VKAPI_CALL
 vkNegotiateLoaderLayerInterfaceVersion(VkNegotiateLayerInterface* pVersionStruct) {
     if (!pVersionStruct || pVersionStruct->sType != LAYER_NEGOTIATE_INTERFACE_STRUCT)
         return VK_ERROR_INITIALIZATION_FAILED;
@@ -38,3 +48,7 @@ vkNegotiateLoaderLayerInterfaceVersion(VkNegotiateLayerInterface* pVersionStruct
     pVersionStruct->pfnGetPhysicalDeviceProcAddr = NULL;
     return VK_SUCCESS;
 }
+
+#ifdef __cplusplus
+}
+#endif
