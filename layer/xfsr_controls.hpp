@@ -10,7 +10,7 @@
 
 namespace xfsr_ctrl {
 
-enum class Upscaler : uint8_t { Blit = 0, Fsr1 = 1, Nis = 2, Edge = 3 };
+enum class Upscaler : uint8_t { Blit = 0, Fsr1 = 1, Nis = 2, Edge = 3, Nearest = 4 };
 
 struct Snapshot {
     float scale = 1.5f;

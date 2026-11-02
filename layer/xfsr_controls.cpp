@@ -4,6 +4,7 @@
 
 #if !defined(_WIN32)
 #include <dlfcn.h>
+#include <elf.h>
 #include <fcntl.h>
 #include <linux/input.h>
 #include <dirent.h>
@@ -201,6 +202,8 @@ const char* upscalerName(Upscaler u) {
         return "nis";
     case Upscaler::Edge:
         return "edge";
+    case Upscaler::Nearest:
+        return "nearest";
     default:
         return "fsr1";
     }
@@ -211,6 +214,9 @@ Upscaler parseUpscaler(const char* s) {
     if (std::strcmp(s, "blit") == 0 || std::strcmp(s, "0") == 0) return Upscaler::Blit;
     if (std::strcmp(s, "nis") == 0 || std::strcmp(s, "2") == 0) return Upscaler::Nis;
     if (std::strcmp(s, "edge") == 0 || std::strcmp(s, "3") == 0) return Upscaler::Edge;
+    if (std::strcmp(s, "nearest") == 0 || std::strcmp(s, "nn") == 0 || std::strcmp(s, "pixel") == 0 ||
+        std::strcmp(s, "4") == 0)
+        return Upscaler::Nearest;
     if (std::strcmp(s, "fsr1") == 0 || std::strcmp(s, "fsr") == 0 || std::strcmp(s, "1") == 0)
         return Upscaler::Fsr1;
     return Upscaler::Fsr1;
@@ -512,12 +518,100 @@ void syncGlShimScaleEnvLocked() {
 }
 
 // Continuous float scale. Recreate only when render pixels move ≥ hysteresis.
+#if !defined(_WIN32)
+// True when the main EXE DT_NEEDED-links libX11 (Godot 3). Godot 4 sowrap does not.
+bool exeLinksLibX11() {
+    static int cached = -1;
+    if (cached >= 0) return cached == 1;
+    cached = 0;
+    const int fd = ::open("/proc/self/exe", O_RDONLY);
+    if (fd < 0) return false;
+    Elf64_Ehdr eh{};
+    if (::read(fd, &eh, sizeof(eh)) != static_cast<ssize_t>(sizeof(eh)) ||
+        std::memcmp(eh.e_ident, ELFMAG, SELFMAG) != 0 || eh.e_ident[EI_CLASS] != ELFCLASS64) {
+        ::close(fd);
+        return false;
+    }
+    if (::lseek(fd, static_cast<off_t>(eh.e_phoff), SEEK_SET) < 0) {
+        ::close(fd);
+        return false;
+    }
+    for (uint16_t i = 0; i < eh.e_phnum; ++i) {
+        Elf64_Phdr ph{};
+        if (::read(fd, &ph, sizeof(ph)) != static_cast<ssize_t>(sizeof(ph))) break;
+        if (ph.p_type != PT_DYNAMIC) continue;
+        const size_t n = static_cast<size_t>(ph.p_filesz / sizeof(Elf64_Dyn));
+        std::vector<Elf64_Dyn> dyn(n);
+        if (::lseek(fd, static_cast<off_t>(ph.p_offset), SEEK_SET) < 0 ||
+            ::read(fd, dyn.data(), ph.p_filesz) != static_cast<ssize_t>(ph.p_filesz))
+            break;
+        Elf64_Addr strtab = 0;
+        size_t strsz = 0;
+        for (const auto& d : dyn) {
+            if (d.d_tag == DT_STRTAB) strtab = d.d_un.d_ptr;
+            if (d.d_tag == DT_STRSZ) strsz = static_cast<size_t>(d.d_un.d_val);
+        }
+        Elf64_Off stroff = 0;
+        int found = 0;
+        if (::lseek(fd, static_cast<off_t>(eh.e_phoff), SEEK_SET) >= 0) {
+            for (uint16_t k = 0; k < eh.e_phnum; ++k) {
+                Elf64_Phdr lp{};
+                if (::read(fd, &lp, sizeof(lp)) != static_cast<ssize_t>(sizeof(lp))) break;
+                if (lp.p_type != PT_LOAD) continue;
+                if (strtab >= lp.p_vaddr && strtab < lp.p_vaddr + lp.p_filesz) {
+                    stroff = lp.p_offset + (strtab - lp.p_vaddr);
+                    found = 1;
+                    break;
+                }
+            }
+        }
+        if (found && strsz > 0 && strsz < (1u << 20)) {
+            std::vector<char> strs(strsz);
+            if (::lseek(fd, static_cast<off_t>(stroff), SEEK_SET) >= 0 &&
+                ::read(fd, strs.data(), strsz) == static_cast<ssize_t>(strsz)) {
+                for (const auto& d : dyn) {
+                    if (d.d_tag != DT_NEEDED) continue;
+                    const size_t off = static_cast<size_t>(d.d_un.d_val);
+                    if (off < strsz && std::strstr(strs.data() + off, "libX11.so")) {
+                        cached = 1;
+                        break;
+                    }
+                }
+            }
+        }
+        break;
+    }
+    ::close(fd);
+    return cached == 1;
+}
+#endif
+
+// Godot 4 / sowrap + Zink (MMX): block live scale. Upscaler/RCAS still switch live.
+bool x11LieBlocksLiveScale() {
+    const char* e = std::getenv("XFSR_X11_LIE");
+    if (e && e[0] == '0') return false;
+    if (e && e[0] == '1') return true;
+#if defined(_WIN32)
+    return false;
+#else
+    const char* z = std::getenv("MESA_LOADER_DRIVER_OVERRIDE");
+    const int zink = z && (std::strcmp(z, "zink") == 0 || std::strncmp(z, "zink,", 5) == 0);
+    if (!zink) return false; // native Vulkan — live F1 is fine
+    return !exeLinksLibX11();
+#endif
+}
+
 void setScaleLocked(float newScale, bool requestRecreate, bool fromAdaptive) {
     constexpr float kMin = 1.05f;
-    constexpr float kMax = 3.0f;
+    constexpr float kMax = 4.0f; // enough for 1080p→4K and low-res→4K pixel-art scales
     if (newScale < kMin) newScale = kMin;
     if (newScale > kMax) newScale = kMax;
     if (std::fabs(newScale - g_rt.scale) < 0.008f) return;
+
+    if (requestRecreate && x11LieBlocksLiveScale()) {
+        armToastLocked("preset: restart edgerun to change");
+        return;
+    }
 
     const uint32_t dw = g_rt.lastDisplayW ? g_rt.lastDisplayW : 1920u;
     const uint32_t dh = g_rt.lastDisplayH ? g_rt.lastDisplayH : 1080u;
@@ -757,10 +851,12 @@ void applyHotkeyActions(const KeyBits& cur, const KeyBits& prev, bool modOk) {
         }
     }
     if (rise(cur.f3, prev.f3)) {
-        // Cycle: fsr1 → blit → nis → edge → fsr1 (live when passes exist).
+        // Cycle: fsr1 → blit → nearest → nis → edge → fsr1 (live when passes exist).
         if (g_rt.upscaler == Upscaler::Fsr1)
             g_rt.upscaler = Upscaler::Blit;
         else if (g_rt.upscaler == Upscaler::Blit)
+            g_rt.upscaler = Upscaler::Nearest;
+        else if (g_rt.upscaler == Upscaler::Nearest)
             g_rt.upscaler = Upscaler::Nis;
         else if (g_rt.upscaler == Upscaler::Nis)
             g_rt.upscaler = Upscaler::Edge;
@@ -913,6 +1009,8 @@ void handleControlLineLocked(char* line) {
         else if (g_rt.upscaler == Upscaler::Fsr1)
             g_rt.upscaler = Upscaler::Blit;
         else if (g_rt.upscaler == Upscaler::Blit)
+            g_rt.upscaler = Upscaler::Nearest;
+        else if (g_rt.upscaler == Upscaler::Nearest)
             g_rt.upscaler = Upscaler::Nis;
         else if (g_rt.upscaler == Upscaler::Nis)
             g_rt.upscaler = Upscaler::Edge;
@@ -938,7 +1036,7 @@ void handleControlLineLocked(char* line) {
             }
         }
         v += frac;
-        if (v >= 1.05f && v <= 3.0f) setScaleLocked(v, true, false);
+        if (v >= 1.05f && v <= 4.0f) setScaleLocked(v, true, false);
     } else if (std::strcmp(cmd, "overlay") == 0 || std::strcmp(cmd, "pin") == 0) {
         if (arg[0] == '0')
             g_rt.overlayPinned = false;
@@ -1264,13 +1362,11 @@ void initFromEnv() {
             g_rt.edgePerf = false;
     }
 
-    const char* ups = std::getenv("XFSR_UPSCALER");
-    if (ups && ups[0]) {
+    if (const char* ups = xfsrEnv("XFSR_UPSCALER", "CROSSVULKAN_UPSCALER")) {
         g_rt.upscaler = parseUpscaler(ups);
     } else {
-        const char* fsr = std::getenv("XFSR_LAYER_FSR");
-        if (!fsr || !fsr[0]) fsr = std::getenv("XFSR_FSR");
-        if (!fsr || !fsr[0]) fsr = std::getenv("CROSSVULKAN_FSR");
+        const char* fsr = xfsrEnv("XFSR_LAYER_FSR");
+        if (!fsr || !fsr[0]) fsr = xfsrEnv("XFSR_FSR", "CROSSVULKAN_FSR");
         g_rt.upscaler = (fsr && fsr[0] == '0') ? Upscaler::Blit : Upscaler::Fsr1;
     }
 

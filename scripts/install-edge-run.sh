@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Install xfsr-run + layer into the user profile from a local build (no root).
-#   ~/.local/bin/xfsr-run
+# Install EdgeScale (edgerun + Vulkan layer + GL shim) into the user profile
+# from a local build (no root).
+#   ~/.local/bin/edgerun
 #   ~/.local/lib/libVkLayer_XFSR.so
 #   ~/.local/share/vulkan/implicit_layer.d/VkLayer_XFSR.json
 #   ~/.local/share/xfsr/shaders/*.spv
@@ -9,7 +10,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/jersobh/edge/main/install.sh | bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BUILD="${XFSR_BUILD:-$ROOT/build}"
+BUILD="${EDGESCALE_BUILD:-${XFSR_BUILD:-$ROOT/build}}"
 PREFIX="${PREFIX:-$HOME/.local}"
 
 cmake -S "$ROOT" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release \
@@ -39,14 +40,14 @@ if [[ ! -f "${XDG_CONFIG_HOME:-$HOME/.config}/edgescale/profiles.conf" \
     "${XDG_CONFIG_HOME:-$HOME/.config}/edgescale/profiles.conf"
 fi
 
-# Drop pre-rename layer artifacts so the loader does not load two XFSR layers.
+# Drop pre-rename layer artifacts so the loader does not load two layers.
 rm -f "$PREFIX/lib/libVkLayer_CROSSVULKAN_xfsr.so" \
   "$PREFIX/share/vulkan/implicit_layer.d/VkLayer_CROSSVULKAN_xfsr.json"
 
-# FSR (+ blit) SPIR-V the layer loads via XFSR_SHADER_DIR
+# Upscaler SPIR-V the layer loads via EDGESCALE_SHADER_DIR / XFSR_SHADER_DIR
 shopt -s nullglob
-for f in "$BUILD"/shaders/fsr_*.spv "$BUILD"/shaders/nis_*.spv \
-         "$BUILD"/shaders/edge_*.spv "$BUILD"/shaders/blit.*.spv; do
+for f in "$BUILD"/shaders/edge_*.spv "$BUILD"/shaders/nis_*.spv \
+         "$BUILD"/shaders/blit.*.spv "$BUILD"/shaders/fsr_*.spv; do
   install -m 644 "$f" "$PREFIX/share/xfsr/shaders/"
 done
 shopt -u nullglob
@@ -89,5 +90,4 @@ echo "Profiles:             ~/.config/edgescale/profiles.conf"
 echo "Auto-tune:            edgescale-auto-tune --apply"
 echo "Roadmap:              $ROOT/ROADMAP.md"
 echo "Steam launch option:  edgerun --preset performance %command%"
-echo "                      (or: xfsr-run --preset performance %command%)"
 echo "Smoke test:           edgerun --print true"

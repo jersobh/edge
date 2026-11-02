@@ -50,8 +50,14 @@ jobs:
 
       - name: Package Linux
         run: |
-          chmod +x scripts/package-xfsr.sh scripts/xfsr-run scripts/edgerun
+          chmod +x scripts/package-xfsr.sh scripts/package-appimage.sh scripts/xfsr-run scripts/edgerun
           ./scripts/package-xfsr.sh
+
+      - name: Package AppImage
+        run: |
+          # appimagetool needs extract-and-run in CI (no FUSE)
+          export APPIMAGE_EXTRACT_AND_RUN=1
+          ./scripts/package-appimage.sh
 
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v4
@@ -60,6 +66,8 @@ jobs:
           path: |
             dist/edgescale-${{ steps.ver.outputs.version }}-linux-x86_64.tar.gz
             dist/edgescale-linux-x86_64.tar.gz
+            dist/EdgeScale-${{ steps.ver.outputs.version }}-x86_64.AppImage
+            dist/EdgeScale-x86_64.AppImage
 
   build-windows:
     name: Build Windows package
@@ -87,12 +95,34 @@ jobs:
           Compress-Archive -Path "dist\edgescale-windows-x86_64\*" -DestinationPath "dist\edgescale-$ver-windows-x86_64.zip" -Force
           Compress-Archive -Path "dist\edgescale-windows-x86_64\*" -DestinationPath "dist\edgescale-windows-x86_64.zip" -Force
 
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          if (-not (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe")) {
+            throw "ISCC.exe not found after Inno Setup install"
+          }
+
+      - name: Build Setup.exe
+        shell: pwsh
+        run: |
+          $ver = "${{ needs.build-linux.outputs.version }}"
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          & $iscc "/DMyAppVersion=$ver" `
+            "/DSourceDir=$pwd\dist\edgescale-windows-x86_64" `
+            "/DOutputDir=$pwd\dist" `
+            "packaging\windows\edgescale.iss"
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
+          Copy-Item "dist\EdgeScale-$ver-Setup.exe" "dist\EdgeScale-Setup.exe" -Force
+
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
           name: edgescale-${{ needs.build-linux.outputs.version }}-windows-x86_64
           path: |
             dist/edgescale-*.zip
+            dist/EdgeScale-*-Setup.exe
+            dist/EdgeScale-Setup.exe
 
   publish-release:
     name: Publish GitHub Release
@@ -124,6 +154,8 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/*.zip
+            dist/*.AppImage
+            dist/*-Setup.exe
           fail_on_unmatched_files: false
           generate_release_notes: true
         env:

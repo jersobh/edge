@@ -40,13 +40,16 @@ PREFER_DGPU=1
 OUT_W=1920
 OUT_H=1080
 OUT_CLI=0
+RENDER_W=0
+RENDER_H=0
+RENDER_CLI=0
 PRESET="${EDGESCALE_PRESET:-${EDGE_PRESET:-${XFSR_PRESET:-${CROSSVULKAN_PRESET_MODE:-quality}}}}"
 PRESET_CLI=0
 # Upscale mode: 1=upscaler, 0=blit (same scale, no shader), native=passthrough (no scale).
 FSR="${EDGESCALE_FSR:-${EDGE_FSR:-${XFSR_FSR:-${CROSSVULKAN_FSR:-1}}}}"
 FSR_CLI=0
 NATIVE=0
-# Spatial upscaler: edge|fsr1|blit|nis
+# Spatial upscaler: edge|fsr1|blit|nis|nearest
 UPSCALER="${EDGESCALE_UPSCALER:-${EDGE_UPSCALER:-${XFSR_UPSCALER:-}}}"
 UPSCALER_CLI=0
 # Default dual-GPU offload to iGPU; disable with --no-offload or XFSR_OFFLOAD=0.
@@ -103,11 +106,14 @@ Options:
   --preset quality|balanced|performance|ultra   Upscale preset (default: quality)
                                           quality = 1.5×, balanced = 1.7×
                                           performance = 2.0×, ultra = 2.5×
-  --upscaler edge|fsr1|nis|blit           Spatial upscaler (default: edge for hybrid/offload, fsr1 for legacy).
+  --output WxH                            Output / display resolution (default: auto-detect, else 1920x1080)
+  --render WxH                            Internal render resolution (overrides preset scale)
+  --upscaler edge|fsr1|nis|blit|nearest   Spatial upscaler (default: edge for hybrid/offload, fsr1 for legacy).
                                           edge = high-performance sub-pixel reconstruction (recommended)
                                           nis  = NVIDIA Image Scaling
                                           fsr1 = AMD FidelityFX Super Resolution 1.0
                                           blit = linear blit at preset scale
+                                          nearest = nearest-neighbor blit (2D pixel art)
   --edge-mode quality|perf                EdgePass mode (default: quality; perf = edge-lite, <0.15ms)
   --edge-sharpness 0..1                   EdgePass post-scale sharpen (default: 0.60)
   --hybrid                                Full iGPU-native offload: dGPU renders low-res; iGPU reconstructs & presents.
@@ -275,6 +281,16 @@ apply_profile_for_command() {
       preset)
         if [[ $PRESET_CLI -eq 0 ]]; then PRESET="$val"; fi
         ;;
+      output)
+        if [[ $OUT_CLI -eq 0 && "$val" == *x* ]]; then
+          OUT_W="${val%%x*}"; OUT_H="${val##*x}"; OUT_CLI=1
+        fi
+        ;;
+      render)
+        if [[ $RENDER_CLI -eq 0 && "$val" == *x* ]]; then
+          RENDER_W="${val%%x*}"; RENDER_H="${val##*x}"; RENDER_CLI=1
+        fi
+        ;;
       fsr)
         if [[ $FSR_CLI -eq 0 ]]; then
           case "$val" in
@@ -291,6 +307,7 @@ apply_profile_for_command() {
           UPSCALER="$val"
           case "$val" in
             blit) FSR=0; NATIVE=0 ;;
+            nearest|nn|pixel) UPSCALER=nearest; FSR=0; NATIVE=0 ;;
             nis|edge|fsr1|fsr) FSR=1; NATIVE=0 ;;
           esac
         fi
@@ -426,6 +443,10 @@ while [[ $# -gt 0 ]]; do
       OUT_W="${2%%x*}"; OUT_H="${2##*x}"; OUT_CLI=1; shift 2 ;;
     --output=*)
       o="${1#*=}"; OUT_W="${o%%x*}"; OUT_H="${o##*x}"; OUT_CLI=1; shift ;;
+    --render)
+      RENDER_W="${2%%x*}"; RENDER_H="${2##*x}"; RENDER_CLI=1; shift 2 ;;
+    --render=*)
+      r="${1#*=}"; RENDER_W="${r%%x*}"; RENDER_H="${r##*x}"; RENDER_CLI=1; shift ;;
     --preset)
       PRESET="${2:?}"; PRESET_CLI=1; shift 2 ;;
     --preset=*) PRESET="${1#*=}"; PRESET_CLI=1; shift ;;
@@ -437,9 +458,10 @@ while [[ $# -gt 0 ]]; do
       UPSCALER="${2:?}"; UPSCALER_CLI=1; shift 2
       case "$UPSCALER" in
         blit) FSR=0; FSR_CLI=1; NATIVE=0 ;;
+        nearest|nn|pixel) UPSCALER=nearest; FSR=0; FSR_CLI=1; NATIVE=0 ;;
         nis|edge|fsr1|fsr) FSR=1; FSR_CLI=1; NATIVE=0; [[ "$UPSCALER" == fsr ]] && UPSCALER=fsr1 ;;
         *)
-          echo "xfsr-run: invalid --upscaler '$UPSCALER' (fsr1|blit|nis|edge)" >&2
+          echo "xfsr-run: invalid --upscaler '$UPSCALER' (fsr1|blit|nearest|nis|edge)" >&2
           exit 2
           ;;
       esac
@@ -448,9 +470,10 @@ while [[ $# -gt 0 ]]; do
       UPSCALER="${1#*=}"; UPSCALER_CLI=1; shift
       case "$UPSCALER" in
         blit) FSR=0; FSR_CLI=1; NATIVE=0 ;;
+        nearest|nn|pixel) UPSCALER=nearest; FSR=0; FSR_CLI=1; NATIVE=0 ;;
         nis|edge|fsr1|fsr) FSR=1; FSR_CLI=1; NATIVE=0; [[ "$UPSCALER" == fsr ]] && UPSCALER=fsr1 ;;
         *)
-          echo "xfsr-run: invalid --upscaler '$UPSCALER' (fsr1|blit|nis|edge)" >&2
+          echo "xfsr-run: invalid --upscaler '$UPSCALER' (fsr1|blit|nearest|nis|edge)" >&2
           exit 2
           ;;
       esac
@@ -568,10 +591,13 @@ OVERLAY="${OVERLAY:-0}"
 
 find_layer_dir() {
   # Installed ~/.local first for Steam/Proton (pressure-vessel sees $HOME).
+  # AppImage / prefix install: $ROOT/share/vulkan (edgerun lives in $ROOT/bin).
   # Dev build next so local iteration still works outside Steam.
   local candidates=(
     "${LAYER_DIR}"
+    "${EDGESCALE_LAYER_PATH:-}"
     "${XFSR_LAYER_PATH:-}"
+    "${ROOT}/share/vulkan/implicit_layer.d"
     "${HOME}/.local/share/vulkan/implicit_layer.d"
     "${BUILD}"
     "/usr/share/vulkan/implicit_layer.d"
@@ -579,7 +605,7 @@ find_layer_dir() {
   local d
   for d in "${candidates[@]}"; do
     [[ -n "$d" ]] || continue
-    if [[ -f "$d/VkLayer_XFSR.json" ]]; then
+    if [[ -f "$d/VkLayer_XFSR.json" ]] || [[ -f "$d/VkLayer_EdgeScale.json" ]]; then
       echo "$d"
       return 0
     fi
@@ -641,6 +667,8 @@ command_looks_opengl() {
       cand="$(command -v "$cand" 2>/dev/null || true)"
     fi
     if [[ -f "$cand" ]]; then
+      # Pure GL titles (no Vulkan). Godot 4 dual GL/VK exports keep the Vulkan path
+      # (EdgeScale hooks vkCreate*); Godot 3 GLES is handled separately (no Zink).
       if grep -qa -i -E 'glViewport|glXSwapBuffers|glfwMakeContextCurrent|SDL_GL_CreateContext|opengl32\.dll|glew32\.dll' "$cand" 2>/dev/null \
          && ! grep -qa -i -E 'vkCreateInstance|d3d9\.dll|d3d11\.dll|d3d12\.dll|dxgi\.dll' "$cand" 2>/dev/null; then
         return 0
@@ -650,19 +678,71 @@ command_looks_opengl() {
   return 1
 }
 
+# Godot 3.x GLES (godot_x11 / rasterizer_gles) — fixed design viewports. Caps-shrink
+# via Zink postage-stamps these; native GL is correct. Godot 4+ uses DisplayServer /
+# RenderingDevice and is fine with Zink.
+command_looks_godot3_gles() {
+  local a cand
+  for a in "$@"; do
+    [[ "$a" == "--" || "$a" == -* ]] && continue
+    cand="$a"
+    if [[ ! -f "$cand" ]] && command -v "$cand" >/dev/null 2>&1; then
+      cand="$(command -v "$cand" 2>/dev/null || true)"
+    fi
+    [[ -f "$cand" ]] || continue
+    if grep -qa 'drivers/gles3/rasterizer_gles3.cpp\|drivers/gles2/rasterizer_gles2.cpp\|platform/x11/godot_x11.cpp' "$cand" 2>/dev/null \
+       && ! grep -qa 'DisplayServerX11\|RenderingDeviceVulkan\|drivers/vulkan/rendering_device' "$cand" 2>/dev/null; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Godot 4 OpenGL Compatibility renderer (embeds Vulkan symbols too — not "pure GL").
+command_looks_godot_gl_compat() {
+  local a cand
+  for a in "$@"; do
+    [[ "$a" == "--" || "$a" == -* ]] && continue
+    cand="$a"
+    if [[ ! -f "$cand" ]] && command -v "$cand" >/dev/null 2>&1; then
+      cand="$(command -v "$cand" 2>/dev/null || true)"
+    fi
+    [[ -f "$cand" ]] || continue
+    if command_looks_godot3_gles "$cand"; then
+      continue
+    fi
+    if grep -qa -E 'gl_compatibility|fallback_to_opengl3|opengl3' "$cand" 2>/dev/null \
+       && grep -qa -E 'DisplayServerX11|Godot Engine' "$cand" 2>/dev/null \
+       && grep -qa -E 'glXSwapBuffers|eglSwapBuffers' "$cand" 2>/dev/null; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 resolve_zink_mode() {
   if command_looks_proton "$@"; then
     export PROTON_USE_WOW64="${PROTON_USE_WOW64:-1}"
   fi
+  # Godot 3 GLES needs Zink so the Vulkan layer (overlay + upscaler) is in-path.
+  # Caps-shrink stays on (default) — libxfsr_gl_shim fills fixed design viewports
+  # (e.g. BunnyForest 512²) into the render image. Pass --no-caps-shrink for identity.
   if [[ $ZINK_CLI -eq 1 ]]; then
     return 0
   fi
   if [[ $USE_ZINK -ne 2 ]]; then
     return 0
   fi
-  if command_looks_opengl "$@"; then
+  if command_looks_godot3_gles "$@"; then
+    USE_ZINK=1
+    echo "xfsr-run: auto: Godot 3 GLES — enabling Zink for FSR." >&2
+  elif command_looks_opengl "$@"; then
     USE_ZINK=1
     echo "xfsr-run: auto: OpenGL title — enabling Zink for FSR." >&2
+  elif command_looks_godot_gl_compat "$@"; then
+    # Godot 4 gl_compatibility / opengl3 export (also embeds unused Vulkan symbols).
+    USE_ZINK=1
+    echo "xfsr-run: auto: Godot OpenGL Compatibility — enabling Zink for FSR." >&2
   elif command_looks_proton "$@"; then
     USE_ZINK=0
     echo "xfsr-run: auto: Proton/Wine detected — Zink off (Vulkan/DXVK path)." >&2
@@ -762,11 +842,81 @@ case "$FSR" in
     ;;
 esac
 
+# Auto-detect primary display when --output was not given.
+detect_display_size() {
+  local w="" h=""
+  if command -v xrandr >/dev/null 2>&1; then
+    # Prefer the primary connected mode; fall back to first connected.
+    # `|| true` — xrandr fails under pure Wayland / no DISPLAY with pipefail.
+    local line
+    line="$(xrandr --current 2>/dev/null | awk '/ connected primary/{print; exit} / connected/{print; exit}' || true)"
+    if [[ -n "$line" ]]; then
+      if [[ "$line" =~ ([0-9]+)x([0-9]+)\+ ]]; then
+        w="${BASH_REMATCH[1]}"; h="${BASH_REMATCH[2]}"
+      fi
+    fi
+  fi
+  if [[ -z "$w" ]] && command -v xdpyinfo >/dev/null 2>&1; then
+    local dim
+    dim="$(xdpyinfo 2>/dev/null | awk '/dimensions:/{print $2; exit}' || true)"
+    if [[ "$dim" =~ ^([0-9]+)x([0-9]+)$ ]]; then
+      w="${BASH_REMATCH[1]}"; h="${BASH_REMATCH[2]}"
+    fi
+  fi
+  # Wayland: wlr-randr when available
+  if [[ -z "$w" ]] && command -v wlr-randr >/dev/null 2>&1; then
+    local mode
+    mode="$(wlr-randr 2>/dev/null | awk '/current/{print $1; exit}' || true)"
+    if [[ "$mode" =~ ^([0-9]+)x([0-9]+)$ ]]; then
+      w="${BASH_REMATCH[1]}"; h="${BASH_REMATCH[2]}"
+    fi
+  fi
+  if [[ -n "$w" && -n "$h" && "$w" -ge 640 && "$h" -ge 480 ]]; then
+    OUT_W="$w"
+    OUT_H="$h"
+    echo "edgerun: detected display ${OUT_W}x${OUT_H}" >&2
+  fi
+}
+
+# Env overrides for absolute sizes (EDGESCALE_* preferred, XFSR_* legacy).
+if [[ $OUT_CLI -eq 0 ]]; then
+  _ow="${EDGESCALE_OUTPUT_W:-${XFSR_OUTPUT_W:-}}"
+  _oh="${EDGESCALE_OUTPUT_H:-${XFSR_OUTPUT_H:-}}"
+  if [[ -n "$_ow" && -n "$_oh" ]]; then
+    OUT_W="$_ow"; OUT_H="$_oh"; OUT_CLI=1
+  elif [[ -n "${EDGESCALE_DISPLAY_EXTENT:-${XFSR_DISPLAY_EXTENT:-}}" ]]; then
+    _ext="${EDGESCALE_DISPLAY_EXTENT:-$XFSR_DISPLAY_EXTENT}"
+    OUT_W="${_ext%%x*}"; OUT_H="${_ext##*x}"; OUT_CLI=1
+  else
+    detect_display_size
+  fi
+  unset _ow _oh _ext
+fi
+if [[ $RENDER_CLI -eq 0 ]]; then
+  _rw="${EDGESCALE_RENDER_W:-${XFSR_RENDER_W:-}}"
+  _rh="${EDGESCALE_RENDER_H:-${XFSR_RENDER_H:-}}"
+  if [[ -n "$_rw" && -n "$_rh" ]]; then
+    RENDER_W="$_rw"; RENDER_H="$_rh"; RENDER_CLI=1
+  fi
+  unset _rw _rh
+fi
+
 SCALE="$(scale_for_preset "$PRESET")"
-RENDER_W="$(awk -v w="$OUT_W" -v s="$SCALE" 'BEGIN{printf "%d", w/s+0.5}')"
-RENDER_H="$(awk -v h="$OUT_H" -v s="$SCALE" 'BEGIN{printf "%d", h/s+0.5}')"
-RENDER_W=$(( RENDER_W < 64 ? 64 : RENDER_W ))
-RENDER_H=$(( RENDER_H < 64 ? 64 : RENDER_H ))
+if [[ $RENDER_CLI -eq 1 && "$RENDER_W" -ge 64 && "$RENDER_H" -ge 64 ]]; then
+  # Absolute internal resolution — derive scale from output÷render (cap 1.01..8).
+  SCALE="$(awk -v ow="$OUT_W" -v rw="$RENDER_W" 'BEGIN{
+    s = (rw > 0) ? ow/rw : 1.5;
+    if (s < 1.01) s = 1.01;
+    if (s > 8.0) s = 8.0;
+    printf "%.4f", s
+  }')"
+  echo "edgerun: manual render ${RENDER_W}x${RENDER_H} → output ${OUT_W}x${OUT_H} (scale=$SCALE)" >&2
+else
+  RENDER_W="$(awk -v w="$OUT_W" -v s="$SCALE" 'BEGIN{printf "%d", w/s+0.5}')"
+  RENDER_H="$(awk -v h="$OUT_H" -v s="$SCALE" 'BEGIN{printf "%d", h/s+0.5}')"
+  RENDER_W=$(( RENDER_W < 64 ? 64 : RENDER_W ))
+  RENDER_H=$(( RENDER_H < 64 ? 64 : RENDER_H ))
+fi
 
 # --hybrid implies offload + one-way + edge (unless CLI already set upscaler).
 if [[ $HYBRID -eq 1 ]]; then
@@ -866,23 +1016,28 @@ fi
 if [[ $SKIP_LAYER -eq 0 ]]; then
   ensure_built
   LAYER_DIR="$(find_layer_dir)" || {
-    echo "xfsr-run: layer JSON not found. Try: ./scripts/install-xfsr-run.sh" >&2
+    echo "edgerun: layer JSON not found. Try: ./scripts/install-edge-run.sh" >&2
     exit 1
   }
 fi
 
 # SPIR-V for the layer (installed under share/xfsr/shaders, or build/shaders).
-if [[ $SKIP_LAYER -eq 0 && -z "${XFSR_SHADER_DIR:-}" ]]; then
+if [[ $SKIP_LAYER -eq 0 && -z "${XFSR_SHADER_DIR:-}" && -z "${EDGESCALE_SHADER_DIR:-}" ]]; then
   for d in \
     "${ROOT}/share/xfsr/shaders" \
+    "${ROOT}/share/edgescale/shaders" \
     "${HOME}/.local/share/xfsr/shaders" \
+    "${HOME}/.local/share/edgescale/shaders" \
     "${BUILD}/shaders" \
     "${ROOT}/build/shaders"; do
     if [[ -f "$d/fsr_easu_fp32.comp.spv" ]]; then
       export XFSR_SHADER_DIR="$d"
+      export EDGESCALE_SHADER_DIR="$d"
       break
     fi
   done
+elif [[ $SKIP_LAYER -eq 0 && -n "${EDGESCALE_SHADER_DIR:-}" && -z "${XFSR_SHADER_DIR:-}" ]]; then
+  export XFSR_SHADER_DIR="$EDGESCALE_SHADER_DIR"
 fi
 
 # Valve/pressure-vessel: do NOT set VK_IMPLICIT_LAYER_PATH / VK_LAYER_PATH — they
@@ -940,6 +1095,10 @@ if [[ $SKIP_LAYER -eq 0 ]]; then
     export XFSR_FSR=1
     export XFSR_LAYER_FSR=0
     export XFSR_UPSCALER=blit
+  elif [[ "$UPSCALER" == "nearest" ]]; then
+    export XFSR_FSR=1
+    export XFSR_LAYER_FSR=0
+    export XFSR_UPSCALER=nearest
   elif [[ "$UPSCALER" == "nis" ]]; then
     export XFSR_FSR=1
     export XFSR_LAYER_FSR=0
@@ -1011,16 +1170,22 @@ if [[ $ONE_WAY_CLI -eq 1 ]]; then
 else
   unset XFSR_IGPU_PRESENT 2>/dev/null || true
 fi
-# Wayland: ICD currentExtent is often UINT_MAX — seed the layer so caps-shrink works
-# on the first CreateSwapchain (otherwise identity @ full res, flat bench FPS).
-export XFSR_OUTPUT_W="$OUT_W"
-export XFSR_OUTPUT_H="$OUT_H"
-export XFSR_DISPLAY_W="$OUT_W"
-export XFSR_DISPLAY_H="$OUT_H"
-export XFSR_RENDER_W="$RENDER_W"
-export XFSR_RENDER_H="$RENDER_H"
+# Always publish scale. Absolute DISPLAY/RENDER seeds are only safe when the user
+# (or gamescope nest) pinned an output size — otherwise a monitor-sized hint makes
+# windowed Zink present at the wrong extent (image does not fill the window).
 export XFSR_SCALE="$SCALE"
-export XFSR_DISPLAY_EXTENT="${OUT_W}x${OUT_H}"
+if [[ $OUT_CLI -eq 1 || $RENDER_CLI -eq 1 || $USE_GAMESCOPE -eq 1 ]]; then
+  export XFSR_OUTPUT_W="$OUT_W"
+  export XFSR_OUTPUT_H="$OUT_H"
+  export XFSR_DISPLAY_W="$OUT_W"
+  export XFSR_DISPLAY_H="$OUT_H"
+  export XFSR_DISPLAY_EXTENT="${OUT_W}x${OUT_H}"
+  export XFSR_RENDER_W="$RENDER_W"
+  export XFSR_RENDER_H="$RENDER_H"
+else
+  unset XFSR_OUTPUT_W XFSR_OUTPUT_H XFSR_DISPLAY_W XFSR_DISPLAY_H XFSR_DISPLAY_EXTENT \
+        XFSR_RENDER_W XFSR_RENDER_H 2>/dev/null || true
+fi
 if [[ -n "$CAPS_SHRINK" ]]; then
   export XFSR_CAPS_SHRINK="$CAPS_SHRINK"
 fi
@@ -1041,6 +1206,8 @@ elif [[ "${XFSR_UPSCALER:-}" == "nis" ]]; then
   _mode="nis"
 elif [[ "${XFSR_UPSCALER:-}" == "edge" ]]; then
   _mode="edge"
+elif [[ "${XFSR_UPSCALER:-}" == "nearest" ]]; then
+  _mode="nearest"
 elif [[ "${XFSR_UPSCALER:-}" == "blit" || "${XFSR_LAYER_FSR:-1}" == "0" ]]; then
   _mode="blit"
 elif [[ "${XFSR_UPSCALER:-}" == "fsr1" ]]; then
@@ -1130,7 +1297,12 @@ if [[ $USE_ZINK -eq 1 ]]; then
     echo "xfsr-run: Zink without xfsr shim (gamescope owns ${RENDER_W}x${RENDER_H})." >&2
   else
     SHIM=""
-    for d in "${HOME}/.local/lib" "$BUILD" "$ROOT/lib" "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/../lib"; do
+    # Prefer the shim next to the layer we are loading (dev build / --layer-dir),
+    # then the install prefix — avoids a stale ~/.local shim with a new layer.
+    for d in "$BUILD" "${LAYER_DIR:-}" "${LAYER_DIR:-}/../lib" "${ROOT}/lib" \
+             "${HOME}/.local/lib" \
+             "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/../lib"; do
+      [[ -n "$d" ]] || continue
       if [[ -f "$d/libxfsr_gl_shim.so" ]]; then
         SHIM="$d/libxfsr_gl_shim.so"
         break
@@ -1277,7 +1449,7 @@ if [[ $DO_CHECK -eq 1 ]]; then
   fi
   rm -f /tmp/xfsr-check-out.$$ /tmp/xfsr-check-err.$$
   case "$mode" in
-    proxy|proxy-blit|proxy-nis|proxy-edge|hybrid-edge)
+    proxy|proxy-blit|proxy-nearest|proxy-nis|proxy-edge|hybrid-edge)
       echo "xfsr-run: CHECK OK — upscale path engaged (mode=$mode)" >&2
       exit 0
       ;;
@@ -1305,6 +1477,7 @@ wrap_gamescope() {
   if [[ -z "$filt" ]]; then
     case "${XFSR_UPSCALER:-$UPSCALER}" in
       nis|edge) filt=nis ;;
+      nearest|nn|pixel) filt=nearest ;;
       blit) filt=linear ;;
       *) filt=fsr ;;
     esac

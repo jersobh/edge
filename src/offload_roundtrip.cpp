@@ -169,9 +169,15 @@ const GpuImage& OffloadRoundTrip::submitBlit(FrameTransfer& fwd, FrameTransfer& 
                                              EdgePass& edgeScratch, const GpuImage& appImage,
                                              uint32_t waitSemCount, const VkSemaphore* waitSems,
                                              const VkPipelineStageFlags* waitStages,
-                                             VkImageLayout appLayout) {
+                                             VkImageLayout appLayout, VkFilter filter) {
+    struct BlitUser {
+        EdgePass* edge;
+        VkFilter filter;
+    };
+    BlitUser user{&edgeScratch, filter};
     auto fn = [](void* u, VkCommandBuffer cmd, const GpuImage& src) -> const GpuImage& {
-        auto* p = static_cast<EdgePass*>(u);
+        auto* bu = static_cast<BlitUser*>(u);
+        EdgePass* p = bu->edge;
         const int slot = p->writeOut % EdgePass::kOutRing;
         p->readyOut = slot;
         p->writeOut = (slot + 1) % EdgePass::kOutRing;
@@ -193,7 +199,7 @@ const GpuImage& OffloadRoundTrip::submitBlit(FrameTransfer& fwd, FrameTransfer& 
         blit.dstOffsets[0] = {0, 0, 0};
         blit.dstOffsets[1] = {static_cast<int32_t>(dst.width), static_cast<int32_t>(dst.height), 1};
         ctx->vk.CmdBlitImage(cmd, src.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst.image,
-                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
+                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, bu->filter);
         transitionImage(ctx, cmd, dst.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_TRANSFER_BIT,
                         VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
@@ -201,6 +207,6 @@ const GpuImage& OffloadRoundTrip::submitBlit(FrameTransfer& fwd, FrameTransfer& 
                         VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_SHADER_READ_BIT);
         return dst;
     };
-    return submitCustom(fwd, back, fn, &edgeScratch, appImage, waitSemCount, waitSems, waitStages,
+    return submitCustom(fwd, back, fn, &user, appImage, waitSemCount, waitSems, waitStages,
                         appLayout);
 }

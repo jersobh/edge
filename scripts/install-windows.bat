@@ -37,7 +37,7 @@ echo.
 echo   Hotkeys (in-game):
 echo     F1  : Cycle presets (Quality, Balanced, Performance, Ultra)
 echo     F2  : Toggle RCAS or Edge quality/perf mode
-echo     F3  : Cycle upscaler (edge, fsr1, nis, blit)
+echo     F3  : Cycle upscaler (fsr1, blit, nearest, nis, edge)
 echo     F10 : Pin/unpin HUD overlay
 echo ============================================
 

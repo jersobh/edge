@@ -1,1 +1,1 @@
-install-xfsr-run.sh
+install-edge-run.sh

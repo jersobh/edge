@@ -204,6 +204,9 @@ xfsr_ctrl::Upscaler resolveUpscaler() {
         if (u[0]) {
             if (std::strcmp(u, "edge") == 0 || u[0] == '3') return xfsr_ctrl::Upscaler::Edge;
             if (std::strcmp(u, "nis") == 0 || u[0] == '2') return xfsr_ctrl::Upscaler::Nis;
+            if (std::strcmp(u, "nearest") == 0 || std::strcmp(u, "nn") == 0 ||
+                std::strcmp(u, "pixel") == 0 || u[0] == '4')
+                return xfsr_ctrl::Upscaler::Nearest;
             if (std::strcmp(u, "blit") == 0 || u[0] == '0') return xfsr_ctrl::Upscaler::Blit;
             return xfsr_ctrl::Upscaler::Fsr1;
         }
@@ -215,6 +218,8 @@ xfsr_ctrl::Upscaler resolveUpscaler() {
     switch (u) {
     case xfsr_ctrl::Upscaler::Blit:
         return "blit";
+    case xfsr_ctrl::Upscaler::Nearest:
+        return "nearest";
     case xfsr_ctrl::Upscaler::Nis:
         return "nis";
     case xfsr_ctrl::Upscaler::Edge:
@@ -353,8 +358,21 @@ bool zinkActive() {
 
 // Same formula for Vulkan, DXVK, and Zink, windowed or fullscreen.
 // 1080p ultra is 768×432; a 1280×720 window at the same scale is 512×288.
+// Absolute XFSR_RENDER_W/H (edgerun --render) wins over scale when set.
 void computeRenderSize(uint32_t displayW, uint32_t displayH, float scale, uint32_t* outW,
                        uint32_t* outH) {
+    const char* erw = xfsrEnv("XFSR_RENDER_W", "EDGESCALE_RENDER_W");
+    const char* erh = xfsrEnv("XFSR_RENDER_H", "EDGESCALE_RENDER_H");
+    if (erw && erh && erw[0] && erh[0]) {
+        uint32_t rw = 0, rh = 0;
+        if (parseU32(erw, &rw) && parseU32(erh, &rh) && rw >= 64u && rh >= 64u) {
+            if (rw > displayW) rw = displayW;
+            if (rh > displayH) rh = displayH;
+            *outW = rw;
+            *outH = rh;
+            return;
+        }
+    }
     const float s = scale < 1.01f ? 1.f : scale;
     uint32_t rw = std::max(64u, static_cast<uint32_t>(displayW / s + 0.5f));
     uint32_t rh = std::max(64u, static_cast<uint32_t>(displayH / s + 0.5f));
@@ -505,9 +523,10 @@ struct ProxySwapchain {
     // One-way: iGPU owns WSI (opaque app handle). Prefer one-way; fall back on failure
     // (NVIDIA hybrids historically SIGSEGV when apps leak WSI to the wrong ICD).
     bool zinkOffloadRoundtrip = false;
-    bool useFsr = false;  // FSR1 EASU/RCAS
-    bool useNis = false;  // NIS-style spatial upscaler
-    bool useEdge = false; // edge upscaler (hybrid default)
+    bool useFsr = false;     // FSR1 EASU/RCAS
+    bool useNis = false;     // NIS-style spatial upscaler
+    bool useEdge = false;    // edge upscaler (hybrid default)
+    bool useNearest = false; // nearest-neighbor blit (pixel art)
 
     std::vector<GpuImage> appImages;
     uint32_t acquireIndex = 0;
@@ -794,6 +813,7 @@ void destroyProxy(ProxySwapchain* ps) {
     ps->useFsr = false;
     ps->useNis = false;
     ps->useEdge = false;
+    ps->useNearest = false;
     delete ps;
     // No g_mu here (DestroyDevice may already hold it). Next proxy create re-publishes.
     unsetenv("XFSR_GL_REMAP");
@@ -1138,8 +1158,10 @@ bool setupOffloadPipeline(ProxySwapchain* ps, VkSwapchainKHR oldPresentSwapchain
             ps->useFsr = scaling && ups == xfsr_ctrl::Upscaler::Fsr1;
             ps->useNis = scaling && ups == xfsr_ctrl::Upscaler::Nis;
             ps->useEdge = scaling && ups == xfsr_ctrl::Upscaler::Edge;
-            if (hybridWanted() && scaling && !ps->useEdge && !ps->useNis && !ps->useFsr) {
-                // Hybrid defaults to edge when upscaler unset/blit.
+            ps->useNearest = scaling && ups == xfsr_ctrl::Upscaler::Nearest;
+            if (hybridWanted() && scaling && !ps->useEdge && !ps->useNis && !ps->useFsr &&
+                !ps->useNearest && ups != xfsr_ctrl::Upscaler::Blit) {
+                // Hybrid defaults to edge when upscaler unset (not blit/nearest).
                 ps->useEdge = true;
             }
         }
@@ -1254,12 +1276,18 @@ bool setupOffloadPipeline(ProxySwapchain* ps, VkSwapchainKHR oldPresentSwapchain
                 logv("[xfsr] dual-GPU ready: render %ux%u on %s → %s present %ux%u fmt=%u%s\n",
                      ps->renderW, ps->renderH, dd->dgpu.props.deviceName, dd->igpu.props.deviceName,
                      ps->displayW, ps->displayH, static_cast<unsigned>(ps->format),
-                     ps->useFsr ? " (FSR1)" : " (blit)");
+                     ps->useFsr ? " (FSR1)"
+                                : (ps->useNearest ? " (nearest)"
+                                : (ps->useEdge ? " (edge)"
+                                : (ps->useNis ? " (NIS)" : " (blit)"))));
             } else if (scaling) {
-                logv("[xfsr] same-GPU blit ready: render %ux%u → display %ux%u fmt=%u on %s%s\n",
+                logv("[xfsr] same-GPU ready: render %ux%u → display %ux%u fmt=%u on %s%s\n",
                      ps->renderW, ps->renderH, ps->displayW, ps->displayH,
                      static_cast<unsigned>(ps->format), dd->dgpu.props.deviceName,
-                     ps->useFsr ? " (FSR1)" : "");
+                     ps->useFsr ? " (FSR1)"
+                                : (ps->useNearest ? " (nearest)"
+                                : (ps->useEdge ? " (edge)"
+                                : (ps->useNis ? " (NIS)" : " (blit)"))));
             } else {
                 logv("[xfsr] identity present ready: %ux%u fmt=%u on %s\n", ps->displayW, ps->displayH,
                      static_cast<unsigned>(ps->format), dd->dgpu.props.deviceName);
@@ -1319,6 +1347,7 @@ bool reconfigureOffloadPresentPath(ProxySwapchain* ps) {
     const bool wantFsr = wantUps == xfsr_ctrl::Upscaler::Fsr1;
     const bool wantNis = wantUps == xfsr_ctrl::Upscaler::Nis;
     const bool wantEdge = wantUps == xfsr_ctrl::Upscaler::Edge;
+    const bool wantNearest = wantUps == xfsr_ctrl::Upscaler::Nearest;
     const bool wantRcas = xfsr_ctrl::enabled() ? xfsr_ctrl::peek().rcas : true;
 
     ps->fsr.destroy();
@@ -1368,6 +1397,7 @@ bool reconfigureOffloadPresentPath(ProxySwapchain* ps) {
         ps->useFsr = wantFsr;
         ps->useNis = wantNis;
         ps->useEdge = wantEdge;
+        ps->useNearest = wantNearest;
         ps->fsr.enableRcas = wantRcas;
         // Always allocate FSR/NIS/edge outputs — F3 can flip without reconfigure.
         ps->fsr.resize(ps->renderW, ps->renderH, ps->displayW, ps->displayH);
@@ -1405,7 +1435,10 @@ bool reconfigureOffloadPresentPath(ProxySwapchain* ps) {
         std::fprintf(stderr,
                      "[xfsr] reconfigured live: offload=%s (round-trip) upscaler=%s xfer=%s\n",
                      ps->offloadIgpu ? "on" : "off",
-                     ps->useEdge ? "edge" : (ps->useNis ? "nis" : (ps->useFsr ? "fsr1" : "blit")),
+                     ps->useEdge     ? "edge"
+                     : (ps->useNis   ? "nis"
+                     : (ps->useFsr   ? "fsr1"
+                     : (ps->useNearest ? "nearest" : "blit"))),
                      ps->offloadIgpu ? FrameTransfer::backendName(dd->xfer.backend) : "n/a");
         return true;
     } catch (const std::exception& e) {
@@ -1421,6 +1454,7 @@ bool reconfigureOffloadPresentPath(ProxySwapchain* ps) {
             ps->useFsr = wantFsr;
             ps->useNis = wantNis;
             ps->useEdge = wantEdge;
+            ps->useNearest = wantNearest;
             ps->fsr.enableRcas = wantRcas;
             ps->fsr.resize(ps->renderW, ps->renderH, ps->displayW, ps->displayH);
             if (wantNis) {
@@ -2409,21 +2443,55 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
         }
     } else if (haveHint && (appW < hintW || appH < hintH) &&
                (!haveSurf || surfW < hintW || surfH < hintH)) {
-        // Wayland Zink/native, or Windowed/borderless low-res where surface or app is smaller than the display
-        ps->displayW = hintW;
-        ps->displayH = hintH;
-        ps->renderW = appW;
-        ps->renderH = appH;
-        if (dd->inst) {
-            dd->inst->realW = hintW;
-            dd->inst->realH = hintH;
-            dd->inst->realFromSurface = true;
-            if (appW > 0 && !capsShrinkEnabled()) {
-                dd->inst->scale = static_cast<float>(hintW) / static_cast<float>(appW);
+        // Wayland / borderless: seed present size from DISPLAY_EXTENT. Only trust the
+        // hint when the create looks near-fullscreen relative to it — otherwise
+        // windowed Zink jumps to the monitor size and the image does not fill the
+        // actual window (letterbox / postage-stamp).
+        const uint32_t refW = haveSurf && surfW > 0 ? std::max(surfW, appW) : appW;
+        const uint32_t refH = haveSurf && surfH > 0 ? std::max(surfH, appH) : appH;
+        uint32_t expectedRw = 0, expectedRh = 0;
+        if (dd->inst) computeRenderSize(hintW, hintH, dd->inst->scale, &expectedRw, &expectedRh);
+        const bool nearFullscreen = refW >= (hintW * 4u) / 5u && refH >= (hintH * 4u) / 5u;
+        // Caps-/wl-shrunk fullscreen: app extent matches hint/scale (±8px).
+        const bool shrunkFullscreen =
+            expectedRw >= 64 && expectedRh >= 64 &&
+            std::abs(static_cast<int>(appW) - static_cast<int>(expectedRw)) <= 8 &&
+            std::abs(static_cast<int>(appH) - static_cast<int>(expectedRh)) <= 8;
+        if (nearFullscreen || shrunkFullscreen || !zinkActive()) {
+            ps->displayW = hintW;
+            ps->displayH = hintH;
+            ps->renderW = appW;
+            ps->renderH = appH;
+            if (dd->inst) {
+                dd->inst->realW = hintW;
+                dd->inst->realH = hintH;
+                dd->inst->realFromSurface = true;
+                if (appW > 0 && !capsShrinkEnabled()) {
+                    dd->inst->scale = static_cast<float>(hintW) / static_cast<float>(appW);
+                }
             }
+            logv("[xfsr] in-game/hint proxy: render %ux%u → display hint %ux%u (scale %.2fx)\n",
+                 appW, appH, hintW, hintH, dd->inst ? dd->inst->scale : 1.0f);
+        } else {
+            // Windowed Zink with a mismatched monitor hint — recover window from scale.
+            ps->renderW = appW;
+            ps->renderH = appH;
+            ps->displayW = appW;
+            ps->displayH = appH;
+            if (dd->inst && dd->inst->scale >= 1.01f) {
+                const uint32_t dw =
+                    static_cast<uint32_t>(static_cast<float>(appW) * dd->inst->scale + 0.5f);
+                const uint32_t dh =
+                    static_cast<uint32_t>(static_cast<float>(appH) * dd->inst->scale + 0.5f);
+                if (dw >= appW && dh >= appH) {
+                    ps->displayW = dw;
+                    ps->displayH = dh;
+                }
+            }
+            logv("[xfsr] zink windowed: render %ux%u → display %ux%u (ignored monitor hint "
+                 "%ux%u)\n",
+                 appW, appH, ps->displayW, ps->displayH, hintW, hintH);
         }
-        logv("[xfsr] in-game/hint proxy: render %ux%u → display hint %ux%u (scale %.2fx)\n", appW,
-             appH, hintW, hintH, dd->inst ? dd->inst->scale : 1.0f);
     } else if (forceScaleEnabled() && !zinkActive()) {
         // Full-window create (DXVK / apps that ignore caps): present at window size,
         // render at preset. On Wayland without a concrete extent, only trust the
@@ -2601,7 +2669,9 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
                  reinterpret_cast<void*>(ps->handle), ps->renderW, ps->renderH, ps->displayW,
                  ps->displayH, ps->appImages.size(), ps->offloadIgpu ? "dual-GPU" : "same-GPU",
                  ps->useEdge ? "+edge"
-                             : (ps->useNis ? "+NIS" : (ps->useFsr ? "+FSR1" : "")),
+                             : (ps->useNis ? "+NIS"
+                             : (ps->useFsr ? "+FSR1"
+                             : (ps->useNearest ? "+nearest" : ""))),
                  ps->opaqueAppHandle ? " (opaque app handle)" : "");
     {
         const char* mode = "proxy-blit";
@@ -2611,6 +2681,8 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
             mode = "proxy-nis";
         else if (ps->useFsr)
             mode = "proxy";
+        else if (ps->useNearest)
+            mode = "proxy-nearest";
         xfsr_ctrl::publishPresentStatus(mode, ps->renderW, ps->renderH, ps->displayW, ps->displayH,
                                         0);
     }
@@ -3203,6 +3275,7 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
                          ps->nis.out[0].image;
             ps->useEdge = ctrl.upscaler == xfsr_ctrl::Upscaler::Edge && ps->edge.displayW != 0 &&
                           ps->edge.out[0].image;
+            ps->useNearest = ctrl.upscaler == xfsr_ctrl::Upscaler::Nearest;
         }
     }
 
@@ -3289,11 +3362,13 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
                 }
                 roundtripUpscaled = true;
             } else if (ps->edge.ctx && fused) {
-                // Blit mode on round-trip offload: perform linear blit on the iGPU.
+                // Blit / nearest mode on round-trip offload: scale on the iGPU.
+                const VkFilter filt =
+                    ps->useNearest ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
                 frameImg = &OffloadRoundTrip::submitBlit(
                     dd->xfer, dd->xferBack, ps->edge, ps->appImages[idx],
                     pPresentInfo->waitSemaphoreCount, waitSems, waitStagePtr,
-                    VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+                    VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, filt);
                 roundtripUpscaled = true;
             }
             (void)queue;
@@ -3579,9 +3654,11 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
                 blit.dstOffsets[0] = {0, 0, 0};
                 blit.dstOffsets[1] = {static_cast<int32_t>(ps->displayW),
                                       static_cast<int32_t>(ps->displayH), 1};
+                const VkFilter blitFilt =
+                    ps->useNearest ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
                 pd.CmdBlitImage(cmd, srcImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                 ps->realImages[realIdx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
-                                &blit, VK_FILTER_LINEAR);
+                                &blit, blitFilt);
             }
 
             if (xfsr_ctrl::enabled() && ctrl.showOverlay && ctrl.status[0]) {
@@ -3725,6 +3802,8 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
                 st = "proxy-nis";
             else if (ps->useFsr)
                 st = "proxy";
+            else if (ps->useNearest)
+                st = "proxy-nearest";
             xfsr_ctrl::publishPresentStatus(st, ps->renderW, ps->renderH, ps->displayW,
                                             ps->displayH, ps->presentCount);
         }
@@ -3732,7 +3811,10 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
             (ps->presentCount == 60 || (ps->presentCount > 0 && ps->presentCount % 300 == 0))) {
             std::fprintf(stderr, "[xfsr] presented %u frames (%ux%u → %ux%u %s)\n", ps->presentCount,
                          ps->renderW, ps->renderH, ps->displayW, ps->displayH,
-                         ps->useEdge ? "edge" : (ps->useNis ? "NIS" : (ps->useFsr ? "FSR1" : "blit")));
+                         ps->useEdge ? "edge"
+                                     : (ps->useNis ? "NIS"
+                                     : (ps->useFsr ? "FSR1"
+                                     : (ps->useNearest ? "nearest" : "blit"))));
         }
         if (pPresentInfo->pResults) {
             for (uint32_t i = 0; i < pPresentInfo->swapchainCount; ++i)

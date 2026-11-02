@@ -19,7 +19,7 @@ endif()
 option(XFSR_BUILD_DEMO "Build xfsr FSR3 demo (needs FidelityFX SDK libs)" ON)
 option(XFSR_BUILD_BENCH "Build xfsr_load_vk / xfsr_load_gl bench apps" ON)
 
-message(STATUS "xfsr / xfsr-run version ${XFSR_VERSION}")
+message(STATUS "EdgeScale / edgerun version ${XFSR_VERSION}")
 
 include(FetchContent)
 
@@ -340,7 +340,7 @@ if(XFSR_BUILD_BENCH)
 endif()
 
 if(NOT WIN32)
-  # OpenGL viewport remap for Zink + FSR (LD_PRELOAD from xfsr-run).
+  # OpenGL viewport remap for Zink (LD_PRELOAD from edgerun).
   add_library(xfsr_gl_shim SHARED gl/xfsr_gl_shim.c)
   set_target_properties(xfsr_gl_shim PROPERTIES
     OUTPUT_NAME "xfsr_gl_shim"
@@ -349,13 +349,14 @@ if(NOT WIN32)
   target_link_libraries(xfsr_gl_shim PRIVATE ${CMAKE_DL_LIBS})
   target_compile_options(xfsr_gl_shim PRIVATE -fvisibility=hidden -Wall -Wextra)
 
-  # User install: ~/.local/bin/xfsr-run + layer under ~/.local/{lib,share/vulkan/...}
-  add_custom_target(install-xfsr-layer
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/install-xfsr-run.sh
+  # User install: ~/.local/bin/edgerun + layer under ~/.local/{lib,share/vulkan/...}
+  add_custom_target(install-edge-run
+    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/install-edge-run.sh
     DEPENDS VkLayer_XFSR xfsr_gl_shim
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-    COMMENT "Installing xfsr-run + implicit layer to ~/.local"
+    COMMENT "Installing edgerun + implicit layer to ~/.local"
   )
+  add_custom_target(install-xfsr-layer DEPENDS install-edge-run)
 
   # Release tarball: dist/xfsr-${VERSION}-linux-x86_64.tar.gz
   add_custom_target(package-xfsr

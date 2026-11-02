@@ -60,7 +60,8 @@ struct OffloadRoundTrip {
                                       const GpuImage& appImage, uint32_t waitSemCount,
                                       const VkSemaphore* waitSems,
                                       const VkPipelineStageFlags* waitStages,
-                                      VkImageLayout appLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+                                      VkImageLayout appLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                                      VkFilter filter = VK_FILTER_LINEAR);
 
     // XFSR_RT_LEGACY=1 → old chained path (A/B benchmarking).
     static bool legacyRequested();

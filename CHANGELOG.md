@@ -1,9 +1,34 @@
 # Changelog
 
-All notable changes to **xfsr** / **xfsr-run** are documented here.
+All notable changes to **EdgeScale** (`edgerun` / legacy `xfsr-run`) are documented here.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
+
+## [Unreleased]
+
+## [0.8.3] — 2026-11-02
+
+### Added
+
+- **Linux AppImage**: portable `EdgeScale-*-x86_64.AppImage` release artifact ([`scripts/package-appimage.sh`](scripts/package-appimage.sh)); primary Linux install path (curl installer demoted).
+- **Windows Setup.exe**: Inno Setup installer/uninstaller ([`packaging/windows/edgescale.iss`](packaging/windows/edgescale.iss)) with Add/Remove Programs support; ZIP + `.bat` scripts remain as fallback.
+- **Nearest-neighbor upscaler** (`--upscaler nearest`): `VK_FILTER_NEAREST` blit for 2D pixel art; F3 cycle includes `blit → nearest → nis → edge`.
+- **Manual resolutions**: `--render WxH` for absolute internal size; `--output WxH` auto-detects the primary display when omitted (supports 4K). Profile keys `output=` / `render=`. Adaptive scale max raised to 4.0×.
+
+### Changed
+
+- README refreshed for EdgeScale branding (`EDGESCALE_*` env vars primary), current one-way/fused offload guidance, AppImage + Setup.exe install, nearest + 4K docs.
+- **Install script rename**: [`scripts/install-edge-run.sh`](scripts/install-edge-run.sh) replaces `install-xfsr-run.sh` (`install-edgerun.sh` remains a symlink). Docs and CMake `install-edge-run` target updated; user-facing copy no longer leads with proprietary FSR branding.
+- **Godot 3 GLES (BunnyForest)**: auto-enable Zink with caps-shrink so the overlay and live upscaler/preset changes work; GL shim remaps default-framebuffer viewports only (keeps design RTs intact) and does **not** X11 size-lie when the exe links `libX11` (avoids maximize/fullscreen postage-stamps).
+- **Godot 4 sowrap + Zink (MMX)**: live F1 preset recreate is blocked (toast: restart `edgerun` with `--preset`); upscaler hotkeys still apply live.
+
+### Fixed
+
+- **Zink image not filling the window**:
+  - Avoid monitor-sized `DISPLAY_EXTENT` unless `--output` / `--render` / gamescope is set; CreateSwapchain ignores mismatched monitor seeds for windowed Zink.
+  - GL shim proportionally remaps letterboxed viewports/scissors/blits (Godot keep-aspect), keeps SDL/GLFW window and drawable size queries in sync at render resolution, and preserves `GL_NEAREST` on remapped blits when `--upscaler nearest`.
+- **BunnyForest maximize/fullscreen stamp**: X11 size-lie desynced Godot from WSI after resize; lie auto-off for `libX11`-linked titles; drawable-size queries stay real so stretch tracks the window.
 
 ## [0.8.2] — 2026-11-01
 
@@ -362,7 +387,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - Dual-GPU `SURFACE_LOST` / early `OUT_OF_DATE` (opaque app handle + iGPU-only window WSI)
 - Caps-shrink vs Zink EGL drawable mismatch
 
-[Unreleased]: https://github.com/jersobh/edge/compare/v0.8.2...HEAD
+[Unreleased]: https://github.com/jersobh/edge/compare/v0.8.3...HEAD
+[0.8.3]: https://github.com/jersobh/edge/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/jersobh/edge/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/jersobh/edge/releases/tag/v0.8.1
 [0.8.0]: https://github.com/jersobh/edge/releases/tag/v0.8.0
