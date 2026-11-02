@@ -50,6 +50,16 @@ vec3 beautifyColor(vec3 c) {
     return mix(vec3(sY), outc, 1.0 + satLift);
 }
 
+// Nearest Neighbor Mode: Crisp, integer-friendly point sampling for 2D pixel art games.
+// Eliminates any interpolation blur, haloing, or ringing, preserving crisp sprite pixels.
+vec3 edgeUpscaleNearest(vec2 uv, vec2 renderSize) {
+    vec2 pos = uv * renderSize;
+    ivec2 ipos = ivec2(floor(pos));
+    ivec2 maxCoord = max(ivec2(renderSize + 0.5) - 1, ivec2(0));
+    vec3 c = texelFetch(sampler2D(srcTex, srcSamp), clamp(ipos, ivec2(0), maxCoord), 0).rgb;
+    return beautifyColor(c);
+}
+
 // Fast Perf Mode: Ultra-lightweight edge-directed upscale for very weak GPUs / APUs
 vec3 edgeUpscalePerf(vec2 uv, vec2 renderSize, float sharp) {
     vec2 texel = 1.0 / renderSize;
@@ -212,11 +222,17 @@ void main() {
     if (scale < 1.01)
         scale = max(displaySize.x / renderSize.x, displaySize.y / renderSize.y);
     float sharp = clamp(u.opts.x, 0.0, 1.0);
-    bool perf = u.opts.z > 0.5;
+    int mode = int(u.opts.z + 0.5);
 
     vec2 uv = (vec2(dst) + 0.5) / displaySize;
-    vec3 rgb = perf ? edgeUpscalePerf(uv, renderSize, sharp)
-                    : edgeUpscaleQuality(uv, renderSize, scale, sharp);
+    vec3 rgb;
+    if (mode == 2) {
+        rgb = edgeUpscaleNearest(uv, renderSize);
+    } else if (mode == 1) {
+        rgb = edgeUpscalePerf(uv, renderSize, sharp);
+    } else {
+        rgb = edgeUpscaleQuality(uv, renderSize, scale, sharp);
+    }
 
     rgb = clamp(rgb, 0.0, 1.0);
     vec4 outc = vec4(rgb, 1.0);

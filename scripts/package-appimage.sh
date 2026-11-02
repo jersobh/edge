@@ -21,8 +21,8 @@ APPDIR="$OUT_DIR/.appdir/EdgeScale.AppDir"
 APPIMAGE_NAME="EdgeScale-${VERSION}-${ARCH}.AppImage"
 APPIMAGE_OUT="$OUT_DIR/$APPIMAGE_NAME"
 
-if [[ ! -f "$TAR" ]]; then
-  echo "package-appimage: building Linux tarball first ..."
+if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
+  echo "package-appimage: building Linux package first ..."
   "$ROOT/scripts/package-xfsr.sh"
 fi
 
@@ -44,7 +44,7 @@ rm -rf "$TMP"
 # Layer JSON library_path already points at ../../../lib/libVkLayer_XFSR.so
 # relative to share/vulkan/implicit_layer.d — correct for AppDir/usr layout.
 
-# AppRun: portable launcher (no ~/.local install required)
+# AppRun: portable launcher and offline installer/uninstaller
 cat > "$APPDIR/AppRun" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -52,6 +52,118 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # appimagetool sets APPDIR when running the mounted image; fall back for unpacked AppDir.
 export APPDIR="${APPDIR:-$HERE}"
 PREFIX="$APPDIR/usr"
+
+# Handle --install
+if [[ "${1:-}" == "--install" ]]; then
+  TARGET="${2:-${HOME}/.local}"
+  BIN_DIR="${TARGET}/bin"
+  LIB_DIR="${TARGET}/lib"
+  LAYER_DIR="${TARGET}/share/vulkan/implicit_layer.d"
+  SHADER_DIR="${TARGET}/share/edgescale/shaders"
+  LEGACY_SHADER_DIR="${TARGET}/share/xfsr/shaders"
+
+  echo ">>> Installing EdgeScale into ${TARGET} ..."
+  mkdir -p "$BIN_DIR" "$LIB_DIR" "$LAYER_DIR" "$SHADER_DIR" "$LEGACY_SHADER_DIR"
+
+  cp -f "$PREFIX/bin/edgerun" "$BIN_DIR/edgerun"
+  chmod 755 "$BIN_DIR/edgerun"
+  ln -sf edgerun "$BIN_DIR/xfsr-run"
+
+  if [[ -f "$PREFIX/bin/xfsr-auto-tune" ]]; then
+    cp -f "$PREFIX/bin/xfsr-auto-tune" "$BIN_DIR/xfsr-auto-tune"
+    chmod 755 "$BIN_DIR/xfsr-auto-tune"
+    ln -sf xfsr-auto-tune "$BIN_DIR/edgescale-auto-tune"
+  fi
+  if [[ -f "$PREFIX/bin/xfsr-gamescope-focus" ]]; then
+    cp -f "$PREFIX/bin/xfsr-gamescope-focus" "$BIN_DIR/xfsr-gamescope-focus"
+    chmod 755 "$BIN_DIR/xfsr-gamescope-focus"
+    ln -sf xfsr-gamescope-focus "$BIN_DIR/edgescale-gamescope-focus"
+  fi
+
+  cp -f "$PREFIX/lib/libVkLayer_XFSR.so" "$LIB_DIR/libVkLayer_XFSR.so"
+  chmod 755 "$LIB_DIR/libVkLayer_XFSR.so"
+  if [[ -f "$PREFIX/lib/libxfsr_gl_shim.so" ]]; then
+    cp -f "$PREFIX/lib/libxfsr_gl_shim.so" "$LIB_DIR/libxfsr_gl_shim.so"
+    chmod 755 "$LIB_DIR/libxfsr_gl_shim.so"
+  fi
+
+  if [[ -d "$PREFIX/share/xfsr/shaders" ]]; then
+    cp -a "$PREFIX/share/xfsr/shaders/." "$SHADER_DIR/"
+    cp -a "$PREFIX/share/xfsr/shaders/." "$LEGACY_SHADER_DIR/"
+  fi
+
+  CFG_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/edgescale"
+  LEGACY_CFG="${XDG_CONFIG_HOME:-${HOME}/.config}/xfsr"
+  mkdir -p "$CFG_DIR" "$LEGACY_CFG"
+  if [[ -f "$PREFIX/share/xfsr/profiles.example.conf" ]]; then
+    mkdir -p "${TARGET}/share/edgescale"
+    cp -f "$PREFIX/share/xfsr/profiles.example.conf" "${TARGET}/share/edgescale/profiles.example.conf"
+    if [[ ! -f "$CFG_DIR/profiles.conf" ]]; then
+      cp -f "$PREFIX/share/xfsr/profiles.example.conf" "$CFG_DIR/profiles.conf"
+    fi
+    if [[ ! -f "$LEGACY_CFG/profiles.conf" ]]; then
+      ln -sf "$CFG_DIR/profiles.conf" "$LEGACY_CFG/profiles.conf" 2>/dev/null || true
+    fi
+  fi
+
+  SO_PATH="$(cd "$LIB_DIR" && pwd)/libVkLayer_XFSR.so"
+  for jname in VkLayer_EdgeScale.json VkLayer_XFSR.json; do
+    JSRC="$PREFIX/share/vulkan/implicit_layer.d/$jname"
+    JDST="$LAYER_DIR/$jname"
+    if [[ -f "$JSRC" ]]; then
+      sed "s|\"library_path\"[[:space:]]*:[[:space:]]*\"[^\"]*\"|\"library_path\": \"$SO_PATH\"|" "$JSRC" > "$JDST"
+    fi
+  done
+
+  mkdir -p "${TARGET}/share/applications" "${TARGET}/share/icons/hicolor/256x256/apps"
+  if [[ -f "$APPDIR/edgescale.png" ]]; then
+    cp -f "$APPDIR/edgescale.png" "${TARGET}/share/icons/hicolor/256x256/apps/edgescale.png"
+  fi
+  cat > "${TARGET}/share/applications/edgescale.desktop" <<DESK
+[Desktop Entry]
+Type=Application
+Name=EdgeScale
+Comment=In-process GPU upscaling for Vulkan games
+Exec=edgerun
+Icon=edgescale
+Categories=Game;Utility;
+Terminal=true
+NoDisplay=true
+DESK
+
+  echo
+  echo "=================================================="
+  echo "  EdgeScale installed successfully!"
+  echo "  Installed to: ${TARGET}"
+  echo "=================================================="
+  echo "Runner:   ${BIN_DIR}/edgerun"
+  echo "Layer:    ${LAYER_DIR}/VkLayer_EdgeScale.json"
+  echo
+  echo "Steam launch option:"
+  echo "  edgerun --preset performance %command%"
+  echo
+  exit 0
+fi
+
+# Handle --uninstall
+if [[ "${1:-}" == "--uninstall" ]]; then
+  TARGET="${2:-${HOME}/.local}"
+  echo ">>> Uninstalling EdgeScale from ${TARGET} ..."
+  rm -f "${TARGET}/bin/edgerun" "${TARGET}/bin/xfsr-run" \
+        "${TARGET}/bin/xfsr-auto-tune" "${TARGET}/bin/edgescale-auto-tune" \
+        "${TARGET}/bin/xfsr-gamescope-focus" "${TARGET}/bin/edgescale-gamescope-focus"
+  rm -f "${TARGET}/lib/libVkLayer_XFSR.so" "${TARGET}/lib/libxfsr_gl_shim.so"
+  rm -f "${TARGET}/share/vulkan/implicit_layer.d/VkLayer_EdgeScale.json" \
+        "${TARGET}/share/vulkan/implicit_layer.d/VkLayer_XFSR.json"
+  rm -rf "${TARGET}/share/edgescale" "${TARGET}/share/xfsr"
+  rm -f "${TARGET}/share/applications/edgescale.desktop"
+  rm -f "${TARGET}/share/icons/hicolor/256x256/apps/edgescale.png"
+  rmdir "${TARGET}/bin" "${TARGET}/lib" "${TARGET}/share/vulkan/implicit_layer.d" "${TARGET}/share/vulkan" 2>/dev/null || true
+  rmdir "${TARGET}/share/applications" "${TARGET}/share/icons/hicolor/256x256/apps" "${TARGET}/share/icons/hicolor/256x256" "${TARGET}/share/icons/hicolor" "${TARGET}/share/icons" 2>/dev/null || true
+  rmdir "${TARGET}/share" "${TARGET}" 2>/dev/null || true
+  echo "EdgeScale uninstalled from ${TARGET}."
+  exit 0
+fi
 
 export PATH="$PREFIX/bin:${PATH:-}"
 export LD_LIBRARY_PATH="$PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"

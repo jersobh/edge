@@ -7,12 +7,13 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.8.3] — 2026-11-02
+## [0.9.0] — 2026-11-02
 
 ### Added
 
-- **Linux AppImage**: portable `EdgeScale-*-x86_64.AppImage` release artifact ([`scripts/package-appimage.sh`](scripts/package-appimage.sh)); primary Linux install path (curl installer demoted).
-- **Windows Setup.exe**: Inno Setup installer/uninstaller ([`packaging/windows/edgescale.iss`](packaging/windows/edgescale.iss)) with Add/Remove Programs support; ZIP + `.bat` scripts remain as fallback.
+- **Linux AppImage**: portable `EdgeScale-*-x86_64.AppImage` release artifact ([`scripts/package-appimage.sh`](scripts/package-appimage.sh)) with offline `--install` and `--uninstall` support; primary Linux install path replacing the curl installer.
+- **Windows Setup.exe**: Inno Setup installer/uninstaller ([`packaging/windows/edgescale.iss`](packaging/windows/edgescale.iss)) with icon integration, registry setup, and Add/Remove Programs support; ZIP + `.bat` scripts remain as fallback.
+- **Edge Nearest Neighbor mode** (`--edge-mode nearest`): EdgePass compute shader point-sampling mode dedicated for 2D pixel art games, preserving crisp sprite pixels with zero blur or haloing. F2 hotkey cycles `quality` → `perf` → `nearest` when Edge upscaler is active.
 - **Nearest-neighbor upscaler** (`--upscaler nearest`): `VK_FILTER_NEAREST` blit for 2D pixel art; F3 cycle includes `blit → nearest → nis → edge`.
 - **Manual resolutions**: `--render WxH` for absolute internal size; `--output WxH` auto-detects the primary display when omitted (supports 4K). Profile keys `output=` / `render=`. Adaptive scale max raised to 4.0×.
 
@@ -25,6 +26,13 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Cross-device swapchain re-creation & offload safety**:
+  - Prevented crash (`SIGSEGV` in mesa/radv) when toggling between offload (iGPU swapchain) and same-GPU (dGPU swapchain) modes by properly tracking owning device and avoiding invalid `oldSwapchain` handle reuse across physical devices.
+  - Guarded `F4` offload hotkey in games configured with `offload=0` via profile or env var (e.g. D3D12 / VKD3D titles like Resident Evil Village) to avoid accidental runtime presentation lockups.
+- **Fullscreen Upscaler Switching**:
+  - Live upscaler hotkeys (`F3` cycle between Edge, NIS, FSR1, Nearest, Blit) now update and run immediately in Fullscreen mode. Previously, `xfsr_QueuePresentKHR` guarded live switching behind `ps->renderW != ps->displayW`, which froze upscaler state whenever the title ran at native display resolution.
+  - Passes are lazily initialized and resized upon activation, ensuring live hotkey responsiveness regardless of whether scaling or 1:1 post-processing sharpening is in use.
+  - Fixed `caps_shrink=0` (in-game resolution titles like Resident Evil Village) falsely taking the identity passthrough bypass when entering Fullscreen at lower resolutions due to compositor surface query matching.
 - **Zink image not filling the window**:
   - Avoid monitor-sized `DISPLAY_EXTENT` unless `--output` / `--render` / gamescope is set; CreateSwapchain ignores mismatched monitor seeds for windowed Zink.
   - GL shim proportionally remaps letterboxed viewports/scissors/blits (Godot keep-aspect), keeps SDL/GLFW window and drawable size queries in sync at render resolution, and preserves `GL_NEAREST` on remapped blits when `--upscaler nearest`.
@@ -387,7 +395,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - Dual-GPU `SURFACE_LOST` / early `OUT_OF_DATE` (opaque app handle + iGPU-only window WSI)
 - Caps-shrink vs Zink EGL drawable mismatch
 
-[Unreleased]: https://github.com/jersobh/edge/compare/v0.8.3...HEAD
+[Unreleased]: https://github.com/jersobh/edge/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/jersobh/edge/compare/v0.8.3...v0.9.0
 [0.8.3]: https://github.com/jersobh/edge/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/jersobh/edge/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/jersobh/edge/releases/tag/v0.8.1

@@ -951,7 +951,8 @@ bool createPresentRing(ProxySwapchain* ps, DeviceContext& ctx) {
 bool queryTrueSurfaceExtent(DeviceData* dd, VkSurfaceKHR surface, uint32_t* outW, uint32_t* outH);
 
 bool setupOffloadPipeline(ProxySwapchain* ps, VkSwapchainKHR oldPresentSwapchain,
-                          VkSwapchainKHR oldAppSwapchain, bool preserveAppImages = false) {
+                          VkSwapchainKHR oldAppSwapchain, bool oldPresentOnIgpu = false,
+                          bool preserveAppImages = false) {
     DeviceData* dd = ps->dev;
     if (!dd || !dd->dgpuReady || !dd->inst || !dd->inst->volkReady) return false;
     // Proxy + FSR path is driven by XFSR_FSR; OFFLOAD only selects dual-GPU.
@@ -983,6 +984,20 @@ bool setupOffloadPipeline(ProxySwapchain* ps, VkSwapchainKHR oldPresentSwapchain
         }
         DeviceContext* presentCtx =
             presentsOnIgpu(ps) ? &dd->igpu : &dd->dgpu;
+
+        const bool newPresentsOnIgpu = presentsOnIgpu(ps);
+        if (oldPresentSwapchain != VK_NULL_HANDLE && newPresentsOnIgpu != oldPresentOnIgpu) {
+            DeviceContext* oldCtx = oldPresentOnIgpu ? &dd->igpu : &dd->dgpu;
+            WsiFns oldWsi = wsiFnsFor(dd, oldPresentOnIgpu);
+            if (oldWsi.DestroySwapchainKHR && oldCtx && oldCtx->device) {
+                logv("[xfsr] destroying cross-device old swapchain %p on %s before creating on %s\n",
+                     oldPresentSwapchain, oldPresentOnIgpu ? "iGPU" : "dGPU",
+                     newPresentsOnIgpu ? "iGPU" : "dGPU");
+                oldWsi.DestroySwapchainKHR(oldCtx->device, oldPresentSwapchain, nullptr);
+            }
+            oldPresentSwapchain = VK_NULL_HANDLE;
+            oldAppSwapchain = VK_NULL_HANDLE;
+        }
 
         if (ps->offloadIgpu) {
             if (!dd->xferReady) {
@@ -1194,7 +1209,7 @@ bool setupOffloadPipeline(ProxySwapchain* ps, VkSwapchainKHR oldPresentSwapchain
                 if (xfsr_ctrl::enabled()) {
                     const auto peek = xfsr_ctrl::peek();
                     ps->edge.setSharpness(peek.edgeSharpness);
-                    ps->edge.setPerfMode(peek.edgePerf);
+                    ps->edge.setMode(peek.edgeMode);
                 }
                 ps->edge.resize(ps->renderW, ps->renderH, ps->displayW, ps->displayH);
             } catch (const std::exception& e) {
@@ -1417,7 +1432,7 @@ bool reconfigureOffloadPresentPath(ProxySwapchain* ps) {
             if (xfsr_ctrl::enabled()) {
                 const auto peek = xfsr_ctrl::peek();
                 ps->edge.setSharpness(peek.edgeSharpness);
-                ps->edge.setPerfMode(peek.edgePerf);
+                ps->edge.setMode(peek.edgeMode);
             }
             ps->edge.resize(ps->renderW, ps->renderH, ps->displayW, ps->displayH);
         } catch (const std::exception& e) {
@@ -1466,7 +1481,7 @@ bool reconfigureOffloadPresentPath(ProxySwapchain* ps) {
                 if (xfsr_ctrl::enabled()) {
                     const auto peek = xfsr_ctrl::peek();
                     ps->edge.setSharpness(peek.edgeSharpness);
-                    ps->edge.setPerfMode(peek.edgePerf);
+                    ps->edge.setMode(peek.edgeMode);
                 }
                 ps->edge.resize(ps->renderW, ps->renderH, ps->displayW, ps->displayH);
             }
@@ -1855,7 +1870,16 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSampler(VkDevice device,
         auto it = g_devices.find(keyOf(device));
         if (it != g_devices.end()) dd = it->second;
     }
-    if (!dd || !dd->CreateSampler) return VK_ERROR_INITIALIZATION_FAILED;
+    // RE Engine / vkd3d exit the process on VK_ERROR_INITIALIZATION_FAILED here.
+    // Log once so Steam consoles show why — trampoline needs a tracked device.
+    if (!dd || !dd->CreateSampler) {
+        static std::atomic<int> loggedMiss{0};
+        if (loggedMiss.fetch_add(1) == 0) {
+            std::fprintf(stderr,
+                         "[xfsr] CreateSampler: untracked device (no trampoline)\n");
+        }
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
     if (!pCreateInfo) return dd->CreateSampler(device, pCreateInfo, pAllocator, pSampler);
 
     const float inject = samplerLodBiasInject();
@@ -1865,14 +1889,31 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSampler(VkDevice device,
         return dd->CreateSampler(device, pCreateInfo, pAllocator, pSampler);
     }
 
+    float maxBias = 16.f;
+    if (dd->dgpuReady && dd->dgpu.props.limits.maxSamplerLodBias > 0.f)
+        maxBias = dd->dgpu.props.limits.maxSamplerLodBias;
+
     VkSamplerCreateInfo ci = *pCreateInfo;
-    ci.mipLodBias = std::clamp(ci.mipLodBias + inject, -16.f, 16.f);
+    ci.mipLodBias = std::clamp(ci.mipLodBias + inject, -maxBias, maxBias);
+    VkResult r = dd->CreateSampler(device, &ci, pAllocator, pSampler);
+    if (r != VK_SUCCESS) {
+        // Some titles (Village / Fossilize replay) reject biased samplers — fall back
+        // so we never kill the process over a sharpness tweak.
+        static std::atomic<int> loggedFail{0};
+        if (loggedFail.fetch_add(1) == 0) {
+            std::fprintf(stderr,
+                         "[xfsr] CreateSampler mipLodBias inject %+.3f rejected (%d) — "
+                         "using original\n",
+                         inject, static_cast<int>(r));
+        }
+        return dd->CreateSampler(device, pCreateInfo, pAllocator, pSampler);
+    }
     static std::atomic<int> logged{0};
     if (logged.fetch_add(1) == 0) {
         std::fprintf(stderr, "[xfsr] CreateSampler mipLodBias inject %+.3f (scale-aware)\n",
                      inject);
     }
-    return dd->CreateSampler(device, &ci, pAllocator, pSampler);
+    return r;
 }
 
 VKAPI_ATTR void VKAPI_CALL xfsr_DestroyDevice(VkDevice device,
@@ -1948,12 +1989,24 @@ VKAPI_ATTR void VKAPI_CALL xfsr_DestroyDevice(VkDevice device,
     }
 }
 
-// Map app-facing oldSwapchain (possibly a proxy handle) to a real ICD swapchain.
-VkSwapchainKHR realOldSwapchain(VkSwapchainKHR oldSwapchain) {
+// Map app-facing oldSwapchain (possibly a proxy handle) to a real ICD swapchain on dGPU.
+VkSwapchainKHR realOldSwapchain(DeviceData* dd, VkSwapchainKHR oldSwapchain) {
     if (oldSwapchain == VK_NULL_HANDLE) return VK_NULL_HANDLE;
     std::lock_guard<std::mutex> lock(g_mu);
     ProxySwapchain* oldPs = proxyOf(oldSwapchain);
-    return oldPs ? oldPs->realSwapchain : oldSwapchain;
+    if (!oldPs) return oldSwapchain;
+    if (presentsOnIgpu(oldPs)) {
+        // Old proxy presented on companion iGPU — clean it up so dGPU passthrough gets a clean surface.
+        if (dd && dd->igpu.device && oldPs->realSwapchain != VK_NULL_HANDLE) {
+            WsiFns wsi = wsiFnsFor(dd, true);
+            if (wsi.DestroySwapchainKHR) {
+                wsi.DestroySwapchainKHR(dd->igpu.device, oldPs->realSwapchain, nullptr);
+            }
+            oldPs->realSwapchain = VK_NULL_HANDLE;
+        }
+        return VK_NULL_HANDLE;
+    }
+    return oldPs->realSwapchain;
 }
 
 // True window size from the ICD (never the shrunk currentExtent). Updates inst->realW/H
@@ -2033,7 +2086,7 @@ VkResult createSwapchainPassthrough(DeviceData* dd, const VkSwapchainCreateInfoK
                                     const VkAllocationCallbacks* pAllocator,
                                     VkSwapchainKHR* pSwapchain) {
     VkSwapchainCreateInfoKHR ci = *pCreateInfo;
-    ci.oldSwapchain = realOldSwapchain(pCreateInfo->oldSwapchain);
+    ci.oldSwapchain = realOldSwapchain(dd, pCreateInfo->oldSwapchain);
     // Always restore full window size when not proxying — postage-stamp otherwise.
     uint32_t realW = 0, realH = 0;
     if (dd && pCreateInfo && pCreateInfo->surface &&
@@ -2335,7 +2388,18 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
         auto it = g_devices.find(keyOf(device));
         if (it != g_devices.end()) dd = it->second;
     }
-    if (!dd) return VK_ERROR_INITIALIZATION_FAILED;
+    if (!dd) {
+        std::fprintf(stderr,
+                     "[xfsr] CreateSwapchain: untracked device %ux%u — passthrough unavailable\n",
+                     pCreateInfo ? pCreateInfo->imageExtent.width : 0,
+                     pCreateInfo ? pCreateInfo->imageExtent.height : 0);
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    std::fprintf(stderr, "[xfsr] CreateSwapchain enter %ux%u (volk=%d fsr=%d offload=%d)\n",
+                 pCreateInfo ? pCreateInfo->imageExtent.width : 0,
+                 pCreateInfo ? pCreateInfo->imageExtent.height : 0,
+                 dd->inst && dd->inst->volkReady ? 1 : 0, fsrEnabled() ? 1 : 0,
+                 offloadEnabled() ? 1 : 0);
 
     // Re-entry (volk hooked CreateSwapchain on the app device) → pass through only.
     if (g_inLayerSwapchain > 0) {
@@ -2360,6 +2424,32 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
         return createSwapchainPassthrough(dd, pCreateInfo, pAllocator, pSwapchain);
     }
 
+    // caps_shrink=0 (Village / in-game resolution): never stand up a 1:1 dual-GPU
+    // one-way proxy. RE Engine was aborting inside adopt/setupOffloadPipeline on the
+    // native-sized first swapchain. Passthrough until the app creates a smaller
+    // extent; haveSurf/hint then builds the real upscale proxy.
+    if (!capsShrinkEnabled() && pCreateInfo && pCreateInfo->surface) {
+        const uint32_t aw = pCreateInfo->imageExtent.width;
+        const uint32_t ah = pCreateInfo->imageExtent.height;
+        uint32_t hintW = 0, hintH = 0;
+        const bool haveHint = displayExtentHint(dd->inst, &hintW, &hintH);
+        uint32_t surfW = 0, surfH = 0;
+        const bool haveSurf = queryTrueSurfaceExtent(dd, pCreateInfo->surface, &surfW, &surfH);
+        const bool matchHint = haveHint && aw == hintW && ah == hintH;
+        const bool matchSurf = (!haveHint || aw >= hintW) && haveSurf && aw >= surfW && ah >= surfH;
+        const bool matchSeed =
+            (!haveHint || aw >= hintW) && dd->inst && dd->inst->realW > 0 && dd->inst->realH > 0 &&
+            aw == dd->inst->realW && ah == dd->inst->realH;
+        if (matchHint || matchSurf || matchSeed) {
+            std::fprintf(stderr,
+                         "[xfsr] identity %ux%u (caps_shrink=0) — passthrough until in-game "
+                         "res < display\n",
+                         aw, ah);
+            xfsr_ctrl::publishPresentStatus("identity", aw, ah, aw, ah, 0);
+            return createSwapchainPassthrough(dd, pCreateInfo, pAllocator, pSwapchain);
+        }
+    }
+
     struct InSwapchainGuard {
         InSwapchainGuard() { ++g_inLayerSwapchain; }
         ~InSwapchainGuard() { --g_inLayerSwapchain; }
@@ -2367,11 +2457,13 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
 
     if (!dd->dgpuReady) {
         try {
+            std::fprintf(stderr, "[xfsr] CreateSwapchain adopt dGPU…\n");
             dd->dgpu.deviceGdpa = dd->gdpa;
             dd->dgpu.adopt(dd->physical, device, dd->graphicsFamily, dd->graphicsFamily);
             dd->dgpuReady = true;
+            std::fprintf(stderr, "[xfsr] CreateSwapchain adopt dGPU ok\n");
         } catch (const std::exception& e) {
-            logv("[xfsr] adopt dGPU failed: %s\n", e.what());
+            std::fprintf(stderr, "[xfsr] adopt dGPU failed: %s\n", e.what());
             return createSwapchainPassthrough(dd, pCreateInfo, pAllocator, pSwapchain);
         }
     }
@@ -2586,9 +2678,13 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
             }
             return pr;
         }
-        if (!offloadEnabled() && !fsrEnabled()) {
-            logv("[xfsr] identity present (render==display %ux%u) — bypass proxy\n", ps->renderW,
-                 ps->renderH);
+        // Also bypass when caps_shrink=0 (in-game res titles) — 1:1 offload proxy is
+        // unnecessary and has aborted RE Village during one-way setup.
+        if ((!offloadEnabled() && !fsrEnabled()) || !capsShrinkEnabled()) {
+            std::fprintf(stderr,
+                         "[xfsr] identity present (render==display %ux%u)%s — bypass proxy\n",
+                         ps->renderW, ps->renderH,
+                         !capsShrinkEnabled() ? " caps_shrink=0" : "");
             xfsr_ctrl::publishPresentStatus("identity", ps->renderW, ps->renderH, ps->displayW,
                                             ps->displayH, 0);
             delete ps;
@@ -2599,6 +2695,7 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
     const VkSwapchainKHR oldApp = pCreateInfo->oldSwapchain;
     VkSwapchainKHR oldPresent = VK_NULL_HANDLE;
     VkSwapchainKHR oldShadow = VK_NULL_HANDLE;
+    bool oldPresentOnIgpu = false;
     // Retire previous proxy; leave swapchain handles null so destroyProxy does not
     // double-destroy — ICDs recycle them via oldSwapchain on the creates below.
     if (oldApp != VK_NULL_HANDLE) {
@@ -2620,6 +2717,7 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
             else if (dd && dd->dgpuReady)
                 waitOffloadIdle(dd);
             oldPresent = oldPs->realSwapchain;
+            oldPresentOnIgpu = presentsOnIgpu(oldPs);
             if (!oldPs->opaqueAppHandle && oldPs->appSwapchain &&
                 oldPs->appSwapchain != oldPs->realSwapchain)
                 oldShadow = oldPs->appSwapchain;
@@ -2629,6 +2727,7 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
             destroyProxy(oldPs);
         } else {
             oldPresent = oldApp; // passthrough handle
+            oldPresentOnIgpu = false; // passthrough is always on dGPU
             std::lock_guard<std::mutex> lock(g_mu);
             g_passthrough.erase(keyOf(oldApp));
         }
@@ -2638,8 +2737,10 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
     // Hold life lock across setup so a concurrent present cannot observe a
     // half-resized FrameTransfer / FSR pass (dual-GPU round-trip).
     {
+        std::fprintf(stderr, "[xfsr] CreateSwapchain setup proxy %ux%u → %ux%u…\n", ps->renderW,
+                     ps->renderH, ps->displayW, ps->displayH);
         std::lock_guard<std::mutex> life(g_proxyLife);
-        if (!setupOffloadPipeline(ps, oldPresent, oldShadow)) {
+        if (!setupOffloadPipeline(ps, oldPresent, oldShadow, oldPresentOnIgpu)) {
             std::fprintf(stderr,
                          "[xfsr] proxy setup failed (render %ux%u display %ux%u) — passthrough\n",
                          ps->renderW, ps->renderH, ps->displayW, ps->displayH);
@@ -3217,66 +3318,63 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
 
     // Live-safe: RCAS + edge sharp/mode + FSR↔blit↔NIS↔edge when passes exist.
     // Preset/adaptive scale (F1) uses recreateSwapchain above; F5 one-way needs restart.
-    if (xfsr_ctrl::enabled() && (ps->fsr.ctx || ps->nis.ctx || ps->edge.ctx)) {
+    if (xfsr_ctrl::enabled()) {
         ps->fsr.enableRcas = ctrl.rcas;
         if (ps->edge.ctx) {
             ps->edge.setSharpness(ctrl.edgeSharpness);
-            ps->edge.setPerfMode(ctrl.edgePerf);
+            ps->edge.setMode(ctrl.edgeMode);
         }
-        const bool scaling = ps->renderW != ps->displayW || ps->renderH != ps->displayH;
-        if (scaling) {
-            if (ctrl.upscaler == xfsr_ctrl::Upscaler::Fsr1 &&
-                (ps->fsr.displayW == 0 || !ps->fsr.easuOut[0].image)) {
-                try {
-                    waitPresentRing(ps, presentCtx);
-                    waitOffloadIdle(dd);
-                    if (!ps->fsr.ctx) {
-                        DeviceContext* c = ps->offloadIgpu ? &dd->igpu : &dd->dgpu;
-                        ps->fsr.init(c);
-                    }
-                    ps->fsr.resize(ps->renderW, ps->renderH, ps->displayW, ps->displayH);
-                } catch (const std::exception& e) {
-                    std::fprintf(stderr, "[xfsr] live FSR enable failed: %s\n", e.what());
+        if (ctrl.upscaler == xfsr_ctrl::Upscaler::Fsr1 &&
+            (ps->fsr.displayW == 0 || !ps->fsr.easuOut[0].image)) {
+            try {
+                waitPresentRing(ps, presentCtx);
+                waitOffloadIdle(dd);
+                if (!ps->fsr.ctx) {
+                    DeviceContext* c = ps->offloadIgpu ? &dd->igpu : &dd->dgpu;
+                    ps->fsr.init(c);
                 }
+                ps->fsr.resize(ps->renderW, ps->renderH, ps->displayW, ps->displayH);
+            } catch (const std::exception& e) {
+                std::fprintf(stderr, "[xfsr] live FSR enable failed: %s\n", e.what());
             }
-            if (ctrl.upscaler == xfsr_ctrl::Upscaler::Nis &&
-                (ps->nis.displayW == 0 || !ps->nis.out[0].image)) {
-                try {
-                    waitPresentRing(ps, presentCtx);
-                    waitOffloadIdle(dd);
-                    if (!ps->nis.ctx) {
-                        DeviceContext* c = ps->offloadIgpu ? &dd->igpu : &dd->dgpu;
-                        ps->nis.init(c);
-                    }
-                    ps->nis.resize(ps->renderW, ps->renderH, ps->displayW, ps->displayH);
-                } catch (const std::exception& e) {
-                    std::fprintf(stderr, "[xfsr] live NIS enable failed: %s\n", e.what());
-                }
-            }
-            if (ctrl.upscaler == xfsr_ctrl::Upscaler::Edge &&
-                (ps->edge.displayW == 0 || !ps->edge.out[0].image)) {
-                try {
-                    waitPresentRing(ps, presentCtx);
-                    waitOffloadIdle(dd);
-                    if (!ps->edge.ctx) {
-                        DeviceContext* c = ps->offloadIgpu ? &dd->igpu : &dd->dgpu;
-                        ps->edge.init(c);
-                    }
-                    ps->edge.setSharpness(ctrl.edgeSharpness);
-                    ps->edge.setPerfMode(ctrl.edgePerf);
-                    ps->edge.resize(ps->renderW, ps->renderH, ps->displayW, ps->displayH);
-                } catch (const std::exception& e) {
-                    std::fprintf(stderr, "[xfsr] live Edge enable failed: %s\n", e.what());
-                }
-            }
-            ps->useFsr = ctrl.upscaler == xfsr_ctrl::Upscaler::Fsr1 && ps->fsr.displayW != 0 &&
-                         ps->fsr.easuOut[0].image;
-            ps->useNis = ctrl.upscaler == xfsr_ctrl::Upscaler::Nis && ps->nis.displayW != 0 &&
-                         ps->nis.out[0].image;
-            ps->useEdge = ctrl.upscaler == xfsr_ctrl::Upscaler::Edge && ps->edge.displayW != 0 &&
-                          ps->edge.out[0].image;
-            ps->useNearest = ctrl.upscaler == xfsr_ctrl::Upscaler::Nearest;
         }
+        if (ctrl.upscaler == xfsr_ctrl::Upscaler::Nis &&
+            (ps->nis.displayW == 0 || !ps->nis.out[0].image)) {
+            try {
+                waitPresentRing(ps, presentCtx);
+                waitOffloadIdle(dd);
+                if (!ps->nis.ctx) {
+                    DeviceContext* c = ps->offloadIgpu ? &dd->igpu : &dd->dgpu;
+                    ps->nis.init(c);
+                }
+                ps->nis.resize(ps->renderW, ps->renderH, ps->displayW, ps->displayH);
+            } catch (const std::exception& e) {
+                std::fprintf(stderr, "[xfsr] live NIS enable failed: %s\n", e.what());
+            }
+        }
+        if (ctrl.upscaler == xfsr_ctrl::Upscaler::Edge &&
+            (ps->edge.displayW == 0 || !ps->edge.out[0].image)) {
+            try {
+                waitPresentRing(ps, presentCtx);
+                waitOffloadIdle(dd);
+                if (!ps->edge.ctx) {
+                    DeviceContext* c = ps->offloadIgpu ? &dd->igpu : &dd->dgpu;
+                    ps->edge.init(c);
+                }
+                ps->edge.setSharpness(ctrl.edgeSharpness);
+                ps->edge.setMode(ctrl.edgeMode);
+                ps->edge.resize(ps->renderW, ps->renderH, ps->displayW, ps->displayH);
+            } catch (const std::exception& e) {
+                std::fprintf(stderr, "[xfsr] live Edge enable failed: %s\n", e.what());
+            }
+        }
+        ps->useFsr = ctrl.upscaler == xfsr_ctrl::Upscaler::Fsr1 && ps->fsr.displayW != 0 &&
+                     ps->fsr.easuOut[0].image;
+        ps->useNis = ctrl.upscaler == xfsr_ctrl::Upscaler::Nis && ps->nis.displayW != 0 &&
+                     ps->nis.out[0].image;
+        ps->useEdge = ctrl.upscaler == xfsr_ctrl::Upscaler::Edge && ps->edge.displayW != 0 &&
+                      ps->edge.out[0].image;
+        ps->useNearest = ctrl.upscaler == xfsr_ctrl::Upscaler::Nearest;
     }
 
     try {
@@ -3635,7 +3733,7 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, VK_ACCESS_TRANSFER_WRITE_BIT);
 
             // vkCmdCopyImage requires identical formats — FSR RGBA8 → BGRA_SRGB must blit.
-            const bool canCopy =
+            const bool canCopy = !ps->useNearest &&
                 srcW == ps->displayW && srcH == ps->displayH && srcFmt == ps->format;
             if (canCopy) {
                 VkImageCopy region{};

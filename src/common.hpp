@@ -145,6 +145,7 @@ inline const char* xfsrEnv(const char* name, const char* legacy = nullptr) {
             if (const char* e = std::getenv(es.c_str()); e && e[0]) return e;
             std::string ed = std::string("EDGE_") + (name + 5);
             if (const char* e = std::getenv(ed.c_str()); e && e[0]) return e;
+            if (const char* e = std::getenv(name + 5); e && e[0]) return e;
         }
         if (const char* e = std::getenv(name); e && e[0]) return e;
     }

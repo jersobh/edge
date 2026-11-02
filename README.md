@@ -22,7 +22,7 @@ Wrap your game launch in Steam with `edgerun %command%` to render lower and reco
 </p>
 <p align="center"><a href="https://youtu.be/JAZmOpItF34">Watch the demo on YouTube</a></p>
 
-**Current version:** [0.8.3](https://github.com/jersobh/edge/releases/tag/v0.8.3)  
+**Current version:** [0.9.0](https://github.com/jersobh/edge/releases/tag/v0.9.0)  
 *(Formerly known as `xfsr`; `xfsr-run` and `XFSR_*` env vars remain as aliases.)*
 
 **Documentation & Deep-Dive:**
@@ -112,25 +112,34 @@ edgerun --output 3840x2160 --render 1280x720 --upscaler edge %command%
 ### Linux (AppImage — recommended)
 
 1. Download `EdgeScale-x86_64.AppImage` from [Releases](https://github.com/jersobh/edge/releases/latest).
-2. Make it executable and run it like `edgerun`:
+2. Make it executable:
 
 ```sh
 chmod +x EdgeScale-x86_64.AppImage
-./EdgeScale-x86_64.AppImage --preset performance %command%
 ```
 
-Optional: symlink onto your `PATH`:
+3. **Install to system (`~/.local`)**:
+```sh
+./EdgeScale-x86_64.AppImage --install
+```
+This registers the Vulkan implicit layer (`VkLayer_EdgeScale.json`), installs `edgerun` into `~/.local/bin`, extracts shaders, sets up desktop integration, and configures default profiles.
 
+To uninstall:
+```sh
+./EdgeScale-x86_64.AppImage --uninstall
+```
+
+**Or run portably without installing**:
+```sh
+./EdgeScale-x86_64.AppImage --preset performance %command%
+```
+You can also symlink the AppImage directly to your `PATH`:
 ```sh
 mkdir -p ~/.local/bin
 ln -sf "$(pwd)/EdgeScale-x86_64.AppImage" ~/.local/bin/edgerun
 ```
 
-A versioned `.tar.gz` is also published for manual installs. Legacy one-liner (installs into `~/.local`):
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/jersobh/edge/main/install.sh | sh
-```
+A versioned `.tar.gz` is also provided under Releases for custom packaging.
 
 ### Windows (Setup.exe — recommended)
 
@@ -159,8 +168,8 @@ Fallback: extract `edgescale-windows-x86_64.zip` and run `install-windows.bat` /
 #### In-Game Hotkeys
 Control upscaling in real time without relaunching:
 - **F1**: Cycle scaling preset (`quality` → `balanced` → `performance` → `ultra`)
-- **F2**: Toggle sharpening or Edge quality/perf mode
-- **F3**: Cycle upscaler (`blit` → `nearest` → `nis` → `edge`)
+- **F2**: Toggle sharpening or Edge reconstruction mode (`quality` → `perf` → `nearest` pixel art)
+- **F3**: Cycle upscaler (`edge` → `fsr1` → `blit` → `nearest` → `nis`)
 - **F10**: Toggle HUD overlay pinning
 
 #### Compatibility on Windows
@@ -232,8 +241,8 @@ edgerun --layer-dir ./build --check
 | `--output WxH` | Present / display size (default: auto-detect primary display) |
 | `--render WxH` | Absolute internal render size (overrides preset-derived scale) |
 | `--blit` | Same scale, linear blit (no spatial upscaler) |
-| `--upscaler blit\|nearest\|nis\|edge` | Spatial upscaler (`nearest` = pixel art; `edge` = recommended) |
-| `--edge-mode quality\|perf` | EdgePass quality (sub-pixel edge tangent + CAS) or perf/lite |
+| `--upscaler blit\|nearest\|nis\|edge\|fsr1` | Spatial upscaler (`nearest` = pixel art; `edge` = recommended) |
+| `--edge-mode quality\|perf\|nearest` | EdgePass mode: quality (sub-pixel edge tangent + CAS), perf/lite, or nearest (2D pixel art) |
 | `--edge-sharpness 0..1` | EdgePass post-scale sharpen (default 0.60) |
 | `--lod-bias auto\|off\|<float>` | Negative mip LOD on app samplers (default `auto` = `-log2(scale)`) |
 | `--lod-bias-offset <float>` | Added to LOD bias (e.g. `-0.5`) |
@@ -280,26 +289,22 @@ edgerun --layer-dir ./build --check
 | Key | Action |
 |-----|--------|
 | **F1** | Cycle preset (**live** via swapchain recreate when the title handles `OUT_OF_DATE`) |
-| **F2** | Toggle sharpening (**live**); on `edge`, toggles quality ↔ perf |
-| **F3** | Cycle upscaler blit → nearest → NIS → edge (**live** when passes exist) |
+| **F2** | Toggle sharpening (**live**); on `edge`, cycles `quality` ↔ `perf` ↔ `nearest` (pixel art) |
+| **F3** | Cycle upscaler `edge` → `fsr1` → `blit` → `nearest` → `nis` (**live** when passes exist) |
 | **F4** | Toggle offload same-GPU ↔ round-trip (**live**; brief hitch) |
 | **F5** | Toggle one-way preference (**restart** to move WSI) |
 | **F10** | Pin / unpin the status overlay (**live**) |
 
-A toast appears for a few seconds after each change (and stays if pinned). Keys are read via X11 and/or `/dev/input` (evdev). Set `EDGESCALE_HUD_MOD=1` if you want **Shift+F*** to avoid clashing with game binds. For Proton titles where F10 does nothing, launch with `--overlay` or:
+A toast appears for a few seconds after each change (and stays if pinned). Keys are read via X11, Win32 `GetAsyncKeyState`, and/or `/dev/input` (evdev). Set `EDGESCALE_HUD_MOD=1` if you want **Shift+F*** to avoid clashing with game binds. For Proton titles where F10 does nothing, launch with `--overlay` or use the control file:
 
 ```sh
-echo overlay 1 > "$XDG_RUNTIME_DIR/xfsr-control"
+echo overlay 1 > "$XDG_RUNTIME_DIR/edgescale-control"
+echo preset ultra > "$XDG_RUNTIME_DIR/edgescale-control"
+echo edge_mode nearest > "$XDG_RUNTIME_DIR/edgescale-control"
 ```
+*(Legacy `$XDG_RUNTIME_DIR/xfsr-control` remains symlinked and fully functional).*
 
-If hotkeys still do nothing, check the console for `hotkeys: x11=… evdev=…` and use the control file:
-
-```sh
-echo preset ultra > "$XDG_RUNTIME_DIR/xfsr-control"
-echo rcas 0 >> "$XDG_RUNTIME_DIR/xfsr-control"
-```
-
-Commands: `preset …`, `cycle_preset`, `rcas 0|1`, `edge_sharp 0..1`, `edge_mode quality|perf`,
+Commands: `preset …`, `cycle_preset`, `rcas 0|1`, `edge_sharp 0..1`, `edge_mode quality|perf|nearest`,
 `fsr 0|1`, `upscaler …`, `offload 0|1`, `one-way 0|1`, `overlay 0|1`, `status`.
 `offload` applies live (round-trip); `one-way` needs a restart.
 
@@ -313,22 +318,33 @@ Opt out of caps clamping with `EDGESCALE_CAPS_SHRINK=0` when needed.
 
 ### Environment variables
 
-Prefer **`EDGESCALE_*`** (also accepted: `EDGE_*`). Legacy **`XFSR_*`** names still work.
+EdgeScale uses **`EDGESCALE_*`** (or `EDGE_*`) environment variables. Legacy **`XFSR_*`** names remain fully supported aliases for backwards compatibility.
 
-| Env | Effect |
-|-----|--------|
-| `EDGESCALE_HUD=0` | Disable in-game controls / overlay |
-| `EDGESCALE_OVERLAY=1` | Pin status strip at launch (same as `--overlay`) |
+| Variable | Description |
+|----------|-------------|
+| `ENABLE_EDGESCALE=1` | Enable EdgeScale Vulkan layer (Windows & Linux; alias `ENABLE_XFSR=1`) |
+| `EDGESCALE_PRESET` | Preset mode: `quality` (1.5×), `balanced` (1.7×), `performance` (2.0×), `ultra` (2.5×) |
+| `EDGESCALE_UPSCALER` | Active upscaler: `edge`, `fsr1`, `nis`, `blit`, or `nearest` |
+| `EDGESCALE_EDGE_MODE` | EdgePass mode: `quality` (sub-pixel tangent + CAS), `perf` (lite), or `nearest` (2D pixel art) |
+| `EDGESCALE_EDGE_SHARPNESS` | EdgePass post-scale sharpness (0.0 to 1.0, default 0.60) |
+| `EDGESCALE_RCAS` | Contrast-Adaptive Sharpening pass toggle (`1` = on, `0` = off) |
+| `EDGESCALE_OFFLOAD` | Dual-GPU companion offload (`1` = on by default, `0` = same-GPU) |
+| `EDGESCALE_IGPU_PRESENT=1` | One-way direct iGPU presentation (default with offload; zero back-haul transfer) |
+| `EDGESCALE_IGPU_PRESENT=0` | Force fused asynchronous round-trip offload to dGPU WSI |
+| `EDGESCALE_IGPU_PRESENT=force` | One-way even if MangoHud is still loaded (warning: may SIGSEGV with MangoHud) |
+| `EDGESCALE_OUTPUT_W` / `_H` | Target display / presentation resolution (overrides auto-detection) |
+| `EDGESCALE_RENDER_W` / `_H` | Internal rendering resolution (overrides preset calculation) |
+| `EDGESCALE_HUD=0` | Disable in-game hotkeys and toast messages |
+| `EDGESCALE_OVERLAY=1` | Pin HUD status strip at launch (same as `--overlay`) |
 | `EDGESCALE_HUD_MOD=1` | Require Shift+F* for hotkeys (default: bare F-keys) |
-| `EDGESCALE_CONTROL=/path` | Override control-file path (default `$XDG_RUNTIME_DIR/xfsr-control`) |
-| `EDGESCALE_OUTPUT_W` / `_H` | Present size (same as `--output`) |
-| `EDGESCALE_RENDER_W` / `_H` | Internal render size (same as `--render`) |
-| `EDGESCALE_IGPU_PRESENT=0` | Force round-trip (dGPU WSI) — same as `--no-one-way` |
-| `EDGESCALE_IGPU_PRESENT=1` | One-way iGPU present (any vendor). Skips MangoHud |
-| `EDGESCALE_IGPU_PRESENT=force` | One-way even if MangoHud is still loaded (often SIGSEGV) |
-| `EDGESCALE_DMABUF=1` | Force dma-buf transfer try (default skips NVIDIA↔Mesa) |
-| `EDGESCALE_DMABUF=0` | Never use dma-buf |
-| `EDGESCALE_VERBOSE=1` | Log `offload: …`, `transfer backend=…`, `first present ok` |
+| `EDGESCALE_CONTROL=/path` | Override control-file path (default `$XDG_RUNTIME_DIR/edgescale-control`) |
+| `EDGESCALE_CAPS_SHRINK=0` | Disable surface extent clamping for stubborn engines |
+| `EDGESCALE_ADAPTIVE=1` | Enable dynamic frame-time scaling toward target framerate |
+| `EDGESCALE_TARGET_FPS=60` | Target framerate for adaptive resolution scaling |
+| `EDGESCALE_DMABUF=1` | Force dma-buf zero-copy transfer try |
+| `EDGESCALE_DMABUF=0` | Disable dma-buf buffer imports |
+| `EDGESCALE_VERBOSE=1` | Verbose log output (`offload: …`, `first present ok`, proxy extents) |
+| `EDGESCALE_ZINK=1` | Force Mesa Zink OpenGL-to-Vulkan translation with GL shim |
 
 ### OpenGL / Zink
 
@@ -351,12 +367,12 @@ Needs CMake ≥ 3.20, C++17, `glslc`, Vulkan loader, and `libx11-dev` (GL shim X
 
 ## Versioning
 
-- [`VERSION`](VERSION) — **0.8.3**
+- [`VERSION`](VERSION) — **0.9.0**
 - [`CHANGELOG.md`](CHANGELOG.md)
 - Tag `vX.Y.Z` → GitHub Actions builds Linux AppImage + tarball and Windows Setup.exe + ZIP
 
 ```sh
-git tag v0.8.3 && git push origin v0.8.3
+git tag v0.9.0 && git push origin v0.9.0
 ```
 
 ## Credits

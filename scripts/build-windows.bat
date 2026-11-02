@@ -58,11 +58,25 @@ if exist "%BUILD_DIR%\Release\VkLayer_XFSR.json" copy /y "%BUILD_DIR%\Release\Vk
 if exist "%BUILD_DIR%\shaders\*.spv" copy /y "%BUILD_DIR%\shaders\*.spv" "%DIST_DIR%\shaders\" >nul
 copy /y "scripts\install-windows.bat" "%DIST_DIR%\" >nul
 copy /y "scripts\uninstall-windows.bat" "%DIST_DIR%\" >nul
+if exist "packaging\windows\edgescale.ico" copy /y "packaging\windows\edgescale.ico" "%DIST_DIR%\" >nul
 copy /y "README.md" "%DIST_DIR%\" >nul
 
 if not exist "%DIST_DIR%\VkLayer_XFSR.dll" (
     echo [ERROR] VkLayer_XFSR.dll was not found after build!
     exit /b 1
+)
+
+set "ISCC_EXE="
+where iscc >nul 2>&1 && set "ISCC_EXE=iscc"
+if not defined ISCC_EXE if exist "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" set "ISCC_EXE=C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+if not defined ISCC_EXE if exist "C:\Program Files\Inno Setup 6\ISCC.exe" set "ISCC_EXE=C:\Program Files\Inno Setup 6\ISCC.exe"
+
+if defined ISCC_EXE (
+    echo [Optional] Building EdgeScale-Setup.exe with Inno Setup...
+    "%ISCC_EXE%" /DSourceDir="%DIST_DIR%" /DOutputDir="dist" packaging\windows\edgescale.iss
+    if %errorlevel% equ 0 (
+        echo   Installer generated in dist\
+    )
 )
 
 echo ============================================

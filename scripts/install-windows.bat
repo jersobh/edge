@@ -36,7 +36,7 @@ echo     ENABLE_EDGESCALE=1  (or ENABLE_XFSR=1)
 echo.
 echo   Hotkeys (in-game):
 echo     F1  : Cycle presets (Quality, Balanced, Performance, Ultra)
-echo     F2  : Toggle RCAS or Edge quality/perf mode
+echo     F2  : Toggle RCAS or Edge mode (Quality / Perf / Nearest pixel art)
 echo     F3  : Cycle upscaler (fsr1, blit, nearest, nis, edge)
 echo     F10 : Pin/unpin HUD overlay
 echo ============================================

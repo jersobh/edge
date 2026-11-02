@@ -61,6 +61,9 @@ $ZIG c++ -target "$TARGET" -shared -O2 \
 cp -f "$ROOT/build/shaders"/*.spv "$DIST/shaders/"
 cp -f "$ROOT/scripts/install-windows.bat" "$DIST/"
 cp -f "$ROOT/scripts/uninstall-windows.bat" "$DIST/"
+if [[ -f "$ROOT/packaging/windows/edgescale.ico" ]]; then
+  cp -f "$ROOT/packaging/windows/edgescale.ico" "$DIST/"
+fi
 cp -f "$ROOT/README.md" "$DIST/"
 
 # Write JSON manifests with relative Windows paths

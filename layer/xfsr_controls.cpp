@@ -167,6 +167,7 @@ struct Runtime {
     Upscaler upscaler = Upscaler::Fsr1;
     float edgeSharpness = 0.60f;
     bool edgePerf = false;
+    int edgeMode = 0; // 0=quality, 1=perf, 2=nearest
     bool offload = false;
     bool oneWay = true;
     bool oneWayForce = false;
@@ -443,16 +444,18 @@ void formatStatusLocked(char* out, size_t n) {
     char cpu[16] = "--";
     if (g_metrics.cpu >= 0) std::snprintf(cpu, sizeof(cpu), "%d%%", g_metrics.cpu);
     if (g_rt.upscaler == Upscaler::Edge) {
+        const char* edgeModeStr =
+            (g_rt.edgeMode == 2) ? "nearest" : (g_rt.edgePerf ? "perf" : "hq");
         if (g_rt.adaptive) {
             std::snprintf(out, n,
                           "xfsr A %.2fx tgt:%.0f edge %s sharp:%.2f\nFPS %.0f  CPU %s", g_rt.scale,
-                          g_rt.targetFps, g_rt.edgePerf ? "perf" : "hq", g_rt.edgeSharpness,
+                          g_rt.targetFps, edgeModeStr, g_rt.edgeSharpness,
                           g_metrics.fps, cpu);
         } else {
             std::snprintf(out, n,
                           "xfsr %s %.2fx edge %s sharp:%.2f off:%s 1way:%s\nFPS %.0f  CPU %s",
                           presetLabel(g_rt.scale, g_rt.presetIdx), g_rt.scale,
-                          g_rt.edgePerf ? "perf" : "hq", g_rt.edgeSharpness,
+                          edgeModeStr, g_rt.edgeSharpness,
                           g_rt.offload ? "on" : "off", g_rt.oneWay ? "on" : "off", g_metrics.fps,
                           cpu);
         }
@@ -481,6 +484,11 @@ void armToastLocked(const char* msg) {
 }
 
 void setOffloadLocked(bool on) {
+    const char* envOff = xfsrEnv("XFSR_OFFLOAD", "CROSSVULKAN_OFFLOAD");
+    if (on && envOff && envOff[0] == '0') {
+        armToastLocked("offload locked off by profile");
+        return;
+    }
     g_rt.offload = on;
     if (!on) g_rt.oneWay = false;
     setenv("XFSR_OFFLOAD", on ? "1" : "0", 1);
@@ -490,6 +498,11 @@ void setOffloadLocked(bool on) {
 }
 
 void setOneWayLocked(bool on) {
+    const char* envOff = xfsrEnv("XFSR_OFFLOAD", "CROSSVULKAN_OFFLOAD");
+    if (on && envOff && envOff[0] == '0') {
+        armToastLocked("offload locked off by profile");
+        return;
+    }
     if (on) g_rt.offload = true; // --one-way implies --offload
     g_rt.oneWay = on;
     setenv("XFSR_OFFLOAD", g_rt.offload ? "1" : "0", 1);
@@ -843,9 +856,14 @@ void applyHotkeyActions(const KeyBits& cur, const KeyBits& prev, bool modOk) {
     }
     if (rise(cur.f2, prev.f2)) {
         if (g_rt.upscaler == Upscaler::Edge) {
-            g_rt.edgePerf = !g_rt.edgePerf;
-            setenv("XFSR_EDGE_MODE", g_rt.edgePerf ? "perf" : "quality", 1);
-            armToastLocked(g_rt.edgePerf ? "edge perf (lite)" : "edge quality");
+            g_rt.edgeMode = (g_rt.edgeMode + 1) % 3;
+            g_rt.edgePerf = (g_rt.edgeMode == 1);
+            const char* mname = (g_rt.edgeMode == 2) ? "nearest" : (g_rt.edgeMode == 1 ? "perf" : "quality");
+            setenv("EDGESCALE_EDGE_MODE", mname, 1);
+            setenv("XFSR_EDGE_MODE", mname, 1);
+            const char* label = (g_rt.edgeMode == 2) ? "edge nearest (pixel art)" :
+                                (g_rt.edgeMode == 1 ? "edge perf (lite)" : "edge quality");
+            armToastLocked(label);
         } else {
             g_rt.rcas = !g_rt.rcas;
             armToastLocked(g_rt.rcas ? "RCAS on" : "RCAS off (EASU only)");
@@ -979,19 +997,31 @@ void handleControlLineLocked(char* line) {
     } else if (std::strcmp(cmd, "edge_mode") == 0) {
         bool set = false;
         if (!arg[0] || std::strcmp(arg, "toggle") == 0) {
-            g_rt.edgePerf = !g_rt.edgePerf;
+            g_rt.edgeMode = (g_rt.edgeMode + 1) % 3;
+            g_rt.edgePerf = (g_rt.edgeMode == 1);
+            set = true;
+        } else if (std::strcmp(arg, "nearest") == 0 || std::strcmp(arg, "nn") == 0 ||
+                   std::strcmp(arg, "pixel") == 0 || std::strcmp(arg, "2") == 0) {
+            g_rt.edgeMode = 2;
+            g_rt.edgePerf = false;
             set = true;
         } else if (arg[0] == '1' || std::strcmp(arg, "perf") == 0 || std::strcmp(arg, "lite") == 0 ||
                    std::strcmp(arg, "edge-lite") == 0) {
+            g_rt.edgeMode = 1;
             g_rt.edgePerf = true;
             set = true;
         } else if (arg[0] == '0' || std::strcmp(arg, "quality") == 0 || std::strcmp(arg, "hq") == 0) {
+            g_rt.edgeMode = 0;
             g_rt.edgePerf = false;
             set = true;
         }
         if (set) {
-            setenv("XFSR_EDGE_MODE", g_rt.edgePerf ? "perf" : "quality", 1);
-            armToastLocked(g_rt.edgePerf ? "edge perf (lite)" : "edge quality");
+            const char* mname = (g_rt.edgeMode == 2) ? "nearest" : (g_rt.edgeMode == 1 ? "perf" : "quality");
+            setenv("EDGESCALE_EDGE_MODE", mname, 1);
+            setenv("XFSR_EDGE_MODE", mname, 1);
+            const char* label = (g_rt.edgeMode == 2) ? "edge nearest (pixel art)" :
+                                (g_rt.edgeMode == 1 ? "edge perf (lite)" : "edge quality");
+            armToastLocked(label);
         }
     } else if (std::strcmp(cmd, "fsr") == 0) {
         if (arg[0] == '0')
@@ -1355,12 +1385,19 @@ void initFromEnv() {
         v += frac;
         if (v >= 0.f && v <= 1.f) g_rt.edgeSharpness = v;
     }
-    if (const char* em = std::getenv("XFSR_EDGE_MODE")) {
-        if (em[0] == '1' || std::strcmp(em, "perf") == 0 || std::strcmp(em, "lite") == 0 ||
-            std::strcmp(em, "edge-lite") == 0)
-            g_rt.edgePerf = true;
-        else if (em[0] == '0' || std::strcmp(em, "quality") == 0 || std::strcmp(em, "hq") == 0)
+    if (const char* em = xfsrEnv("XFSR_EDGE_MODE", "CROSSVULKAN_EDGE_MODE")) {
+        if (std::strcmp(em, "nearest") == 0 || std::strcmp(em, "nn") == 0 ||
+            std::strcmp(em, "pixel") == 0 || std::strcmp(em, "2") == 0) {
+            g_rt.edgeMode = 2;
             g_rt.edgePerf = false;
+        } else if (em[0] == '1' || std::strcmp(em, "perf") == 0 || std::strcmp(em, "lite") == 0 ||
+                   std::strcmp(em, "edge-lite") == 0) {
+            g_rt.edgeMode = 1;
+            g_rt.edgePerf = true;
+        } else if (em[0] == '0' || std::strcmp(em, "quality") == 0 || std::strcmp(em, "hq") == 0) {
+            g_rt.edgeMode = 0;
+            g_rt.edgePerf = false;
+        }
     }
 
     if (const char* ups = xfsrEnv("XFSR_UPSCALER", "CROSSVULKAN_UPSCALER")) {
@@ -1508,6 +1545,7 @@ Snapshot poll() {
         s.upscaler = g_rt.upscaler;
         s.edgeSharpness = g_rt.edgeSharpness;
         s.edgePerf = g_rt.edgePerf;
+        s.edgeMode = g_rt.edgeMode;
         s.fsr = (g_rt.upscaler == Upscaler::Fsr1);
         s.offload = g_rt.offload;
         s.oneWay = g_rt.oneWay;
@@ -1524,6 +1562,7 @@ Snapshot poll() {
     s.upscaler = g_rt.upscaler;
     s.edgeSharpness = g_rt.edgeSharpness;
     s.edgePerf = g_rt.edgePerf;
+    s.edgeMode = g_rt.edgeMode;
     s.fsr = (g_rt.upscaler == Upscaler::Fsr1);
     s.offload = g_rt.offload;
     s.oneWay = g_rt.oneWay;
@@ -1553,6 +1592,7 @@ Snapshot peek() {
     s.upscaler = g_rt.upscaler;
     s.edgeSharpness = g_rt.edgeSharpness;
     s.edgePerf = g_rt.edgePerf;
+    s.edgeMode = g_rt.edgeMode;
     s.fsr = (g_rt.upscaler == Upscaler::Fsr1);
     s.offload = g_rt.offload;
     s.oneWay = g_rt.oneWay;

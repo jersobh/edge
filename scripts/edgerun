@@ -114,7 +114,7 @@ Options:
                                           fsr1 = AMD FidelityFX Super Resolution 1.0
                                           blit = linear blit at preset scale
                                           nearest = nearest-neighbor blit (2D pixel art)
-  --edge-mode quality|perf                EdgePass mode (default: quality; perf = edge-lite, <0.15ms)
+  --edge-mode quality|perf|nearest        EdgePass mode (default: quality; perf = edge-lite; nearest = 2D pixel art)
   --edge-sharpness 0..1                   EdgePass post-scale sharpen (default: 0.60)
   --hybrid                                Full iGPU-native offload: dGPU renders low-res; iGPU reconstructs & presents.
                                           dGPU renders low-res; iGPU upscales + presents without back-haul.
@@ -328,6 +328,7 @@ apply_profile_for_command() {
           case "$val" in
             quality|hq|0) EDGE_MODE=quality ;;
             perf|lite|edge-lite|1) EDGE_MODE=perf ;;
+            nearest|nn|pixel|2) EDGE_MODE=nearest ;;
             *) EDGE_MODE="$val" ;;
           esac
         fi
@@ -497,8 +498,9 @@ while [[ $# -gt 0 ]]; do
       case "$EDGE_MODE" in
         quality|hq|0) EDGE_MODE=quality ;;
         perf|lite|edge-lite|1) EDGE_MODE=perf ;;
+        nearest|nn|pixel|2) EDGE_MODE=nearest ;;
         *)
-          echo "xfsr-run: invalid --edge-mode '$EDGE_MODE' (quality|perf)" >&2
+          echo "edgerun: invalid --edge-mode '$EDGE_MODE' (quality|perf|nearest)" >&2
           exit 2
           ;;
       esac
@@ -508,8 +510,9 @@ while [[ $# -gt 0 ]]; do
       case "$EDGE_MODE" in
         quality|hq|0) EDGE_MODE=quality ;;
         perf|lite|edge-lite|1) EDGE_MODE=perf ;;
+        nearest|nn|pixel|2) EDGE_MODE=nearest ;;
         *)
-          echo "xfsr-run: invalid --edge-mode '$EDGE_MODE' (quality|perf)" >&2
+          echo "edgerun: invalid --edge-mode '$EDGE_MODE' (quality|perf|nearest)" >&2
           exit 2
           ;;
       esac
@@ -733,19 +736,19 @@ resolve_zink_mode() {
   if [[ $USE_ZINK -ne 2 ]]; then
     return 0
   fi
-  if command_looks_godot3_gles "$@"; then
+  if command_looks_proton "$@"; then
+    USE_ZINK=0
+    echo "xfsr-run: auto: Proton/Wine detected — Zink off (Vulkan/DXVK path)." >&2
+  elif command_looks_godot3_gles "$@"; then
     USE_ZINK=1
     echo "xfsr-run: auto: Godot 3 GLES — enabling Zink for FSR." >&2
-  elif command_looks_opengl "$@"; then
-    USE_ZINK=1
-    echo "xfsr-run: auto: OpenGL title — enabling Zink for FSR." >&2
   elif command_looks_godot_gl_compat "$@"; then
     # Godot 4 gl_compatibility / opengl3 export (also embeds unused Vulkan symbols).
     USE_ZINK=1
     echo "xfsr-run: auto: Godot OpenGL Compatibility — enabling Zink for FSR." >&2
-  elif command_looks_proton "$@"; then
-    USE_ZINK=0
-    echo "xfsr-run: auto: Proton/Wine detected — Zink off (Vulkan/DXVK path)." >&2
+  elif command_looks_opengl "$@"; then
+    USE_ZINK=1
+    echo "xfsr-run: auto: OpenGL title — enabling Zink for FSR." >&2
   else
     # Unknown native binary: keep Vulkan path (vkcube, native VK games).
     USE_ZINK=0
@@ -1122,6 +1125,7 @@ if [[ $SKIP_LAYER -eq 0 ]]; then
   fi
   export XFSR_RCAS="$RCAS"
   export XFSR_EDGE_MODE="$EDGE_MODE"
+  export EDGESCALE_EDGE_MODE="$EDGE_MODE"
   if [[ -n "$EDGE_SHARP" ]]; then
     export XFSR_EDGE_SHARPNESS="$EDGE_SHARP"
   fi
@@ -1170,22 +1174,40 @@ if [[ $ONE_WAY_CLI -eq 1 ]]; then
 else
   unset XFSR_IGPU_PRESENT 2>/dev/null || true
 fi
-# Always publish scale. Absolute DISPLAY/RENDER seeds are only safe when the user
-# (or gamescope nest) pinned an output size — otherwise a monitor-sized hint makes
-# windowed Zink present at the wrong extent (image does not fill the window).
+# Always publish scale. Absolute DISPLAY/RENDER seeds:
+# - Vulkan / Proton / DXVK (non-Zink): always seed from detected display. Titles like
+#   Village need XFSR_DISPLAY_EXTENT for one-way offload when the ICD reports
+#   UINT_MAX / unknown currentExtent (regression: displayHint=none → early exit).
+# - Zink: only when the user (or gamescope nest) pinned --output/--render — a
+#   monitor-sized auto hint makes windowed GL present at the wrong extent
+#   (postage stamp / image does not fill the window).
 export XFSR_SCALE="$SCALE"
+_seed_abs=0
 if [[ $OUT_CLI -eq 1 || $RENDER_CLI -eq 1 || $USE_GAMESCOPE -eq 1 ]]; then
+  _seed_abs=1
+elif [[ $USE_ZINK -eq 0 ]]; then
+  _seed_abs=1
+fi
+if [[ $_seed_abs -eq 1 ]]; then
   export XFSR_OUTPUT_W="$OUT_W"
   export XFSR_OUTPUT_H="$OUT_H"
   export XFSR_DISPLAY_W="$OUT_W"
   export XFSR_DISPLAY_H="$OUT_H"
   export XFSR_DISPLAY_EXTENT="${OUT_W}x${OUT_H}"
-  export XFSR_RENDER_W="$RENDER_W"
-  export XFSR_RENDER_H="$RENDER_H"
+  # Absolute RENDER only when user/gamescope pinned size. Auto preset→render math stays
+  # in XFSR_SCALE — otherwise computeRenderSize's XFSR_RENDER_* override (added for
+  # --render / 4K) changes force-scale paths for titles like Village (caps_shrink=0).
+  if [[ $OUT_CLI -eq 1 || $RENDER_CLI -eq 1 || $USE_GAMESCOPE -eq 1 ]]; then
+    export XFSR_RENDER_W="$RENDER_W"
+    export XFSR_RENDER_H="$RENDER_H"
+  else
+    unset XFSR_RENDER_W XFSR_RENDER_H 2>/dev/null || true
+  fi
 else
   unset XFSR_OUTPUT_W XFSR_OUTPUT_H XFSR_DISPLAY_W XFSR_DISPLAY_H XFSR_DISPLAY_EXTENT \
         XFSR_RENDER_W XFSR_RENDER_H 2>/dev/null || true
 fi
+unset _seed_abs
 if [[ -n "$CAPS_SHRINK" ]]; then
   export XFSR_CAPS_SHRINK="$CAPS_SHRINK"
 fi

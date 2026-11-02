@@ -25,7 +25,8 @@ struct EdgePass {
     uint32_t displayW = 0;
     uint32_t displayH = 0;
     float sharpness = 0.60f; // 0..1 — overridable live / XFSR_EDGE_SHARPNESS
-    bool perfMode = false;   // default quality (crisp Di Zenzo tensor); XFSR_EDGE_MODE=perf for lite path
+    int edgeMode = 0;        // 0 = quality, 1 = perf, 2 = nearest (2D pixel art)
+    bool perfMode = false;   // backward compat: true when edgeMode == 1
     bool swizzleBgra = false;
     VkFormat outputFormat = VK_FORMAT_R8G8B8A8_UNORM;
 
@@ -35,6 +36,7 @@ struct EdgePass {
 
     void setSharpness(float s);
     void setPerfMode(bool perf);
+    void setMode(int mode);
 
     bool canDirectToSwapchain(VkFormat swapFormat) const;
     static bool formatNeedsBgraSwizzle(VkFormat swapFormat);

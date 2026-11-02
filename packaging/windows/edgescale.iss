@@ -2,7 +2,7 @@
 ; Build after scripts\build-windows.bat has produced dist\edgescale-windows-x86_64\
 
 #ifndef MyAppVersion
-  #define MyAppVersion "0.8.3"
+  #define MyAppVersion "0.9.0"
 #endif
 
 #ifndef SourceDir
@@ -38,6 +38,7 @@ Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayName={#MyAppName} {#MyAppVersion}
+SetupIconFile=edgescale.ico
 UninstallDisplayIcon={app}\edgescale.ico
 InfoAfterFile=
 SetupLogging=yes
@@ -58,6 +59,7 @@ Source: "{#SourceDir}\VkLayer_XFSR.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\shaders\*"; DestDir: "{app}\shaders"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#SourceDir}\install-windows.bat"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\uninstall-windows.bat"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourceDir}\edgescale.ico"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "{#SourceDir}\README.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]

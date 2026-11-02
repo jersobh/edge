@@ -20,6 +20,7 @@ struct Snapshot {
     Upscaler upscaler = Upscaler::Fsr1;
     float edgeSharpness = 0.60f; // 0..1 — EdgePass CAS strength
     bool edgePerf = false;       // EdgePass cheap path (edge-lite)
+    int edgeMode = 0;            // 0 = quality, 1 = perf, 2 = nearest (2D pixel art)
     bool offload = false;     // dual-GPU
     bool oneWay = true;       // prefer iGPU present when offload
     bool oneWayForce = false; // XFSR_IGPU_PRESENT=force (NVIDIA)

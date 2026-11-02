@@ -41,15 +41,17 @@ float parseFloat01(const char* e) {
     return v + frac;
 }
 
-bool parsePerfModeEnv(const char* e) {
-    if (!e || !e[0]) return false;
-    if (e[0] == '1') return true;
-    if (std::strcmp(e, "perf") == 0 || std::strcmp(e, "lite") == 0 ||
+int parseEdgeModeEnv(const char* e) {
+    if (!e || !e[0]) return 0;
+    if (std::strcmp(e, "nearest") == 0 || std::strcmp(e, "nn") == 0 ||
+        std::strcmp(e, "pixel") == 0 || std::strcmp(e, "2") == 0)
+        return 2;
+    if (e[0] == '1' || std::strcmp(e, "perf") == 0 || std::strcmp(e, "lite") == 0 ||
         std::strcmp(e, "edge-lite") == 0 || std::strcmp(e, "edge_lite") == 0)
-        return true;
+        return 1;
     if (e[0] == '0' || std::strcmp(e, "quality") == 0 || std::strcmp(e, "hq") == 0)
-        return false;
-    return false;
+        return 0;
+    return 0;
 }
 
 void createMappedUbo(DeviceContext* ctx, VkBuffer* buf, VkDeviceMemory* mem, void** mapped) {
@@ -124,7 +126,7 @@ void fillUbo(EdgePass& pass, int slot, bool swizzle) {
     c.sizes[3] = static_cast<float>(pass.displayH);
     c.opts[0] = pass.sharpness;
     c.opts[1] = swizzle ? 1.f : 0.f;
-    c.opts[2] = pass.perfMode ? 1.f : 0.f;
+    c.opts[2] = static_cast<float>(pass.edgeMode);
     const float sx = pass.renderW > 0 ? static_cast<float>(pass.displayW) /
                                             static_cast<float>(pass.renderW)
                                       : 1.f;
@@ -148,7 +150,7 @@ void EdgePass::init(DeviceContext* deviceCtx) {
         if (v >= 0.f && v <= 1.f) sharpness = v;
     }
     if (const char* e = xfsrEnv("XFSR_EDGE_MODE", "CROSSVULKAN_EDGE_MODE")) {
-        perfMode = parsePerfModeEnv(e);
+        setMode(parseEdgeModeEnv(e));
     }
     std::printf("EdgePass on %s: sharpness=%.2f mode=%s\n", ctx->props.deviceName, sharpness,
                 perfMode ? "perf" : "quality");
@@ -275,7 +277,16 @@ void EdgePass::setSharpness(float s) {
     sharpness = s;
 }
 
-void EdgePass::setPerfMode(bool perf) { perfMode = perf; }
+void EdgePass::setPerfMode(bool perf) {
+    perfMode = perf;
+    if (perf) edgeMode = 1;
+    else if (edgeMode == 1) edgeMode = 0;
+}
+
+void EdgePass::setMode(int mode) {
+    edgeMode = mode;
+    perfMode = (mode == 1);
+}
 
 bool EdgePass::formatNeedsBgraSwizzle(VkFormat swapFormat) {
     // Direct-to-swapchain creates the storage VkImageView with swapFormat
