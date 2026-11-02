@@ -25,7 +25,7 @@ set "BUILD_DIR=build-windows"
 if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
 
 echo [1/3] Configuring with CMake...
-cmake -B "%BUILD_DIR%" -S . -DCMAKE_BUILD_TYPE=Release -DXFSR_BUILD_DEMO=OFF -DXFSR_BUILD_BENCH=OFF
+cmake -B "%BUILD_DIR%" -S . -A x64 -DCMAKE_BUILD_TYPE=Release -DXFSR_BUILD_DEMO=OFF -DXFSR_BUILD_BENCH=OFF
 if %errorlevel% neq 0 (
     echo [ERROR] CMake configuration failed.
     exit /b %errorlevel%
