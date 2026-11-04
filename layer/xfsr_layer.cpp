@@ -123,10 +123,12 @@ float presetScaleFromEnv() {
             }
         }
         v += frac;
-        if (p != s && v >= 1.01f && v <= 8.0f) return v;
+        if (p != s && v >= 0.125f && v <= 8.0f) return v;
     }
     const char* p = xfsrEnv("XFSR_PRESET", "CROSSVULKAN_PRESET_MODE");
     if (!p) return 1.5f;
+    if (std::strcmp(p, "dsr4k") == 0 || std::strcmp(p, "4k") == 0) return 0.5f;
+    if (std::strcmp(p, "dsr1440p") == 0 || std::strcmp(p, "1440p") == 0) return 0.75f;
     if (std::strcmp(p, "ultra") == 0 || std::strcmp(p, "U") == 0 ||
         std::strcmp(p, "extreme") == 0)
         return 2.5f;
@@ -331,7 +333,10 @@ float samplerLodBiasInject() {
     // auto / unset: only when FSR/scaling is on
     if (!fsrEnabled()) return 0.f;
     const float scale = presetScaleFromEnv();
-    float bias = (scale > 1.01f) ? -std::log2(scale) : 0.f;
+    float bias = 0.f;
+    if (scale > 1.01f || (scale >= 0.125f && scale < 0.99f)) {
+        bias = -std::log2(scale);
+    }
     if (const char* off = xfsrEnv("XFSR_LOD_BIAS_OFFSET", "CROSSVULKAN_LOD_BIAS_OFFSET")) {
         float v = 0.f;
         if (parseFloat(off, &v)) bias += v;
@@ -366,18 +371,14 @@ void computeRenderSize(uint32_t displayW, uint32_t displayH, float scale, uint32
     if (erw && erh && erw[0] && erh[0]) {
         uint32_t rw = 0, rh = 0;
         if (parseU32(erw, &rw) && parseU32(erh, &rh) && rw >= 64u && rh >= 64u) {
-            if (rw > displayW) rw = displayW;
-            if (rh > displayH) rh = displayH;
             *outW = rw;
             *outH = rh;
             return;
         }
     }
-    const float s = scale < 1.01f ? 1.f : scale;
+    const float s = (scale < 0.125f || (scale >= 0.99f && scale <= 1.01f)) ? 1.f : scale;
     uint32_t rw = std::max(64u, static_cast<uint32_t>(displayW / s + 0.5f));
     uint32_t rh = std::max(64u, static_cast<uint32_t>(displayH / s + 0.5f));
-    if (rw > displayW) rw = displayW;
-    if (rh > displayH) rh = displayH;
     *outW = rw;
     *outH = rh;
 }
@@ -388,6 +389,8 @@ struct InstanceData {
     PFN_vkDestroyInstance DestroyInstance = nullptr;
     PFN_vkEnumeratePhysicalDevices EnumeratePhysicalDevices = nullptr;
     PFN_vkGetPhysicalDeviceProperties GetPhysicalDeviceProperties = nullptr;
+    PFN_vkGetPhysicalDeviceMemoryProperties GetPhysicalDeviceMemoryProperties = nullptr;
+    PFN_vkGetPhysicalDeviceMemoryProperties2 GetPhysicalDeviceMemoryProperties2 = nullptr;
     PFN_vkGetPhysicalDeviceQueueFamilyProperties GetPhysicalDeviceQueueFamilyProperties = nullptr;
     PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR GetPhysicalDeviceSurfaceCapabilitiesKHR = nullptr;
     PFN_vkGetPhysicalDeviceSurfaceCapabilities2KHR GetPhysicalDeviceSurfaceCapabilities2KHR =
@@ -435,6 +438,8 @@ struct DeviceData {
     PFN_vkWaitForFences WaitForFences = nullptr;
     PFN_vkResetFences ResetFences = nullptr;
     PFN_vkCreateSampler CreateSampler = nullptr;
+    PFN_vkAllocateMemory AllocateMemory = nullptr;
+    VkPhysicalDeviceMemoryProperties memProps{};
 
     bool isDiscrete = false;
     uint32_t graphicsFamily = 0;
@@ -1549,6 +1554,17 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateInstance(const VkInstanceCreateInfo* p
         getInstProc<PFN_vkEnumeratePhysicalDevices>(id, "vkEnumeratePhysicalDevices");
     id->GetPhysicalDeviceProperties =
         getInstProc<PFN_vkGetPhysicalDeviceProperties>(id, "vkGetPhysicalDeviceProperties");
+    id->GetPhysicalDeviceMemoryProperties =
+        getInstProc<PFN_vkGetPhysicalDeviceMemoryProperties>(
+            id, "vkGetPhysicalDeviceMemoryProperties");
+    id->GetPhysicalDeviceMemoryProperties2 =
+        getInstProc<PFN_vkGetPhysicalDeviceMemoryProperties2>(
+            id, "vkGetPhysicalDeviceMemoryProperties2");
+    if (!id->GetPhysicalDeviceMemoryProperties2) {
+        id->GetPhysicalDeviceMemoryProperties2 =
+            getInstProc<PFN_vkGetPhysicalDeviceMemoryProperties2>(
+                id, "vkGetPhysicalDeviceMemoryProperties2KHR");
+    }
     id->GetPhysicalDeviceQueueFamilyProperties =
         getInstProc<PFN_vkGetPhysicalDeviceQueueFamilyProperties>(
             id, "vkGetPhysicalDeviceQueueFamilyProperties");
@@ -1640,7 +1656,8 @@ void applyCapsShrink(InstanceData* id, VkPhysicalDevice physicalDevice,
     caps->currentExtent = {rw, rh};
     caps->minImageExtent.width = std::min(caps->minImageExtent.width, rw);
     caps->minImageExtent.height = std::min(caps->minImageExtent.height, rh);
-    caps->maxImageExtent = {rw, rh};
+    caps->maxImageExtent.width = std::max(caps->maxImageExtent.width, rw);
+    caps->maxImageExtent.height = std::max(caps->maxImageExtent.height, rh);
     id->capsShrunk = true;
     if (winW != id->lastLogCw || winH != id->lastLogCh || rw != id->lastLogRw ||
         rh != id->lastLogRh) {
@@ -1692,6 +1709,124 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_GetPhysicalDeviceSurfaceCapabilities2KHR(
     if (r == VK_SUCCESS && pSurfaceCapabilities)
         applyCapsShrink(id, physicalDevice, &pSurfaceCapabilities->surfaceCapabilities);
     return r;
+}
+
+#ifndef VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT
+#define VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT static_cast<VkStructureType>(1000237000)
+typedef struct VkPhysicalDeviceMemoryBudgetPropertiesEXT {
+    VkStructureType sType;
+    void* pNext;
+    VkDeviceSize heapBudget[VK_MAX_MEMORY_HEAPS];
+    VkDeviceSize heapUsage[VK_MAX_MEMORY_HEAPS];
+} VkPhysicalDeviceMemoryBudgetPropertiesEXT;
+#endif
+
+uint64_t getSpoofedVramBytes() {
+    static int s_cached = -1;
+    static uint64_t s_bytes = 0;
+    if (s_cached >= 0) return s_bytes;
+
+    const char* env = xfsrEnv("EDGESCALE_SPOOF_VRAM", "XFSR_SPOOF_VRAM");
+    if (!env || !env[0] || std::strcmp(env, "0") == 0 || std::strcmp(env, "off") == 0) {
+        s_cached = 0;
+        s_bytes = 0;
+        return 0;
+    }
+
+    if (std::strcmp(env, "auto") == 0 || std::strcmp(env, "combine") == 0 ||
+        std::strcmp(env, "igpu") == 0 || std::strcmp(env, "1") == 0) {
+        s_bytes = 8ULL * 1024ULL * 1024ULL * 1024ULL;
+        s_cached = 1;
+        return s_bytes;
+    }
+
+    uint64_t num = 0;
+    const char* p = env;
+    while (*p == ' ' || *p == '\t') ++p;
+    while (*p >= '0' && *p <= '9') {
+        num = num * 10 + (*p - '0');
+        ++p;
+    }
+    while (*p == ' ' || *p == '\t') ++p;
+    if (*p == 'G' || *p == 'g') {
+        s_bytes = num * 1024ULL * 1024ULL * 1024ULL;
+    } else if (*p == 'M' || *p == 'm') {
+        s_bytes = num * 1024ULL * 1024ULL;
+    } else if (num <= 64) {
+        s_bytes = num * 1024ULL * 1024ULL * 1024ULL;
+    } else {
+        s_bytes = num * 1024ULL * 1024ULL;
+    }
+
+    s_cached = 1;
+    return s_bytes;
+}
+
+void spoofMemoryProperties(VkPhysicalDeviceMemoryProperties* pProps) {
+    if (!pProps) return;
+    uint64_t targetBytes = getSpoofedVramBytes();
+    if (targetBytes == 0) return;
+
+    for (uint32_t i = 0; i < pProps->memoryHeapCount; ++i) {
+        if (pProps->memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
+            if (pProps->memoryHeaps[i].size < targetBytes) {
+                static bool s_logged = false;
+                if (!s_logged) {
+                    std::fprintf(stderr,
+                                 "[edgescale] VRAM spoof active: heap %u physical %llu MB -> spoofed %llu MB\n",
+                                 i, (unsigned long long)(pProps->memoryHeaps[i].size / (1024 * 1024)),
+                                 (unsigned long long)(targetBytes / (1024 * 1024)));
+                    s_logged = true;
+                }
+                pProps->memoryHeaps[i].size = targetBytes;
+            }
+        }
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL xfsr_GetPhysicalDeviceMemoryProperties(
+    VkPhysicalDevice physicalDevice, VkPhysicalDeviceMemoryProperties* pMemoryProperties) {
+    InstanceData* id = anyInstance();
+    if (id && id->GetPhysicalDeviceMemoryProperties) {
+        id->GetPhysicalDeviceMemoryProperties(physicalDevice, pMemoryProperties);
+    }
+    if (pMemoryProperties) {
+        spoofMemoryProperties(pMemoryProperties);
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL xfsr_GetPhysicalDeviceMemoryProperties2(
+    VkPhysicalDevice physicalDevice, VkPhysicalDeviceMemoryProperties2* pMemoryProperties) {
+    InstanceData* id = anyInstance();
+    if (id && id->GetPhysicalDeviceMemoryProperties2) {
+        id->GetPhysicalDeviceMemoryProperties2(physicalDevice, pMemoryProperties);
+    } else if (id && id->GetPhysicalDeviceMemoryProperties) {
+        if (pMemoryProperties) {
+            id->GetPhysicalDeviceMemoryProperties(physicalDevice, &pMemoryProperties->memoryProperties);
+        }
+    }
+    if (pMemoryProperties) {
+        spoofMemoryProperties(&pMemoryProperties->memoryProperties);
+        uint64_t targetBytes = getSpoofedVramBytes();
+        if (targetBytes > 0) {
+            auto* next = reinterpret_cast<VkBaseOutStructure*>(pMemoryProperties->pNext);
+            while (next) {
+                if (next->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT) {
+                    auto* budget = reinterpret_cast<VkPhysicalDeviceMemoryBudgetPropertiesEXT*>(next);
+                    for (uint32_t i = 0; i < pMemoryProperties->memoryProperties.memoryHeapCount; ++i) {
+                        if (pMemoryProperties->memoryProperties.memoryHeaps[i].flags &
+                            VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
+                            if (budget->heapBudget[i] < targetBytes) {
+                                VkDeviceSize used = budget->heapUsage[i];
+                                budget->heapBudget[i] = (targetBytes > used) ? (targetBytes - used) : targetBytes;
+                            }
+                        }
+                    }
+                }
+                next = next->pNext;
+            }
+        }
+    }
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateDevice(VkPhysicalDevice physicalDevice,
@@ -1825,11 +1960,15 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateDevice(VkPhysicalDevice physicalDevice
     dd->WaitForFences = getDevProc<PFN_vkWaitForFences>(dd, "vkWaitForFences");
     dd->ResetFences = getDevProc<PFN_vkResetFences>(dd, "vkResetFences");
     dd->CreateSampler = getDevProc<PFN_vkCreateSampler>(dd, "vkCreateSampler");
+    dd->AllocateMemory = getDevProc<PFN_vkAllocateMemory>(dd, "vkAllocateMemory");
 
     VkPhysicalDeviceProperties props = propsEarly;
     if (id && props.deviceType == 0)
         id->GetPhysicalDeviceProperties(physicalDevice, &props);
     dd->isDiscrete = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+    if (id && id->GetPhysicalDeviceMemoryProperties) {
+        id->GetPhysicalDeviceMemoryProperties(physicalDevice, &dd->memProps);
+    }
 
     uint32_t qCount = 0;
     if (id) id->GetPhysicalDeviceQueueFamilyProperties(physicalDevice, &qCount, nullptr);
@@ -1913,6 +2052,59 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSampler(VkDevice device,
         std::fprintf(stderr, "[xfsr] CreateSampler mipLodBias inject %+.3f (scale-aware)\n",
                      inject);
     }
+    return r;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL xfsr_AllocateMemory(
+    VkDevice device,
+    const VkMemoryAllocateInfo* pAllocateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkDeviceMemory* pMemory) {
+    DeviceData* dd = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_mu);
+        auto it = g_devices.find(keyOf(device));
+        if (it != g_devices.end()) dd = it->second;
+    }
+    if (!dd || !dd->AllocateMemory) {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    VkResult r = dd->AllocateMemory(device, pAllocateInfo, pAllocator, pMemory);
+    if (r == VK_SUCCESS || r != VK_ERROR_OUT_OF_DEVICE_MEMORY) {
+        return r;
+    }
+
+    // Out of device memory: if VRAM spoofing/oversubscription is active, attempt host fallback!
+    if (getSpoofedVramBytes() == 0 || !pAllocateInfo) {
+        return r;
+    }
+
+    const uint32_t origType = pAllocateInfo->memoryTypeIndex;
+    if (origType >= dd->memProps.memoryTypeCount) return r;
+
+    // Try finding another memory type that has HOST_VISIBLE (PCIe GTT / system RAM)
+    for (uint32_t i = 0; i < dd->memProps.memoryTypeCount; ++i) {
+        if (i == origType) continue;
+        const auto& type = dd->memProps.memoryTypes[i];
+        if (type.propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
+            VkMemoryAllocateInfo fallbackInfo = *pAllocateInfo;
+            fallbackInfo.memoryTypeIndex = i;
+            VkResult fallbackRes = dd->AllocateMemory(device, &fallbackInfo, pAllocator, pMemory);
+            if (fallbackRes == VK_SUCCESS) {
+                static bool s_fallbackLogged = false;
+                if (!s_fallbackLogged) {
+                    std::fprintf(stderr,
+                                 "[edgescale] VRAM oversubscription: spilled %llu MB to system RAM (memoryType %u -> %u)\n",
+                                 (unsigned long long)(pAllocateInfo->allocationSize / (1024 * 1024)),
+                                 origType, i);
+                    s_fallbackLogged = true;
+                }
+                return VK_SUCCESS;
+            }
+        }
+    }
+
     return r;
 }
 
@@ -2533,6 +2725,18 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
             logv("[xfsr] in-game/caps proxy: render %ux%u → display %ux%u (scale %.2fx)\n", appW,
                  appH, surfW, surfH, dd->inst ? dd->inst->scale : 1.0f);
         }
+    } else if (haveSurf && (appW > surfW || appH > surfH)) {
+        // App requested a swapchain larger than the window/surface (e.g. 4K render on 1080p display)
+        // Downsample / supersample (DSR / SSAA) to true window extent.
+        ps->displayW = surfW;
+        ps->displayH = surfH;
+        ps->renderW = appW;
+        ps->renderH = appH;
+        if (dd->inst && appW > 0 && !capsShrinkEnabled()) {
+            dd->inst->scale = static_cast<float>(surfW) / static_cast<float>(appW);
+        }
+        logv("[xfsr] in-game/caps supersample proxy: render %ux%u → display %ux%u (scale %.2fx)\n",
+             appW, appH, surfW, surfH, dd->inst ? dd->inst->scale : 1.0f);
     } else if (haveHint && (appW < hintW || appH < hintH) &&
                (!haveSurf || surfW < hintW || surfH < hintH)) {
         // Wayland / borderless: seed present size from DISPLAY_EXTENT. Only trust the
@@ -2651,7 +2855,8 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
     // otherwise keep the proxy active when offload or FSR/Edge is enabled so iGPU offload
     // and sharpening still run on titles that create native-sized swapchains.
     if (ps->renderW == ps->displayW && ps->renderH == ps->displayH) {
-        const bool kickShrink = dd->inst && dd->inst->scale >= 1.01f && capsShrinkEnabled() &&
+        const bool kickShrink = dd->inst && (dd->inst->scale < 0.99f || dd->inst->scale >= 1.01f) &&
+                                capsShrinkEnabled() &&
                                 !dd->inst->waylandShrinkKick && appW > 0 && appH > 0 &&
                                 (zinkActive() || !haveSurf ||
                                  (haveSurf && appW >= surfW && appH >= surfH));
@@ -3979,12 +4184,24 @@ PFN_vkVoidFunction resolveInstance(const char* pName) {
         return reinterpret_cast<PFN_vkVoidFunction>(xfsr_GetPhysicalDeviceSurfaceCapabilitiesKHR);
     if (std::strcmp(pName, "vkGetPhysicalDeviceSurfaceCapabilities2KHR") == 0)
         return reinterpret_cast<PFN_vkVoidFunction>(xfsr_GetPhysicalDeviceSurfaceCapabilities2KHR);
+    if (std::strcmp(pName, "vkGetPhysicalDeviceMemoryProperties") == 0)
+        return reinterpret_cast<PFN_vkVoidFunction>(xfsr_GetPhysicalDeviceMemoryProperties);
+    if (std::strcmp(pName, "vkGetPhysicalDeviceMemoryProperties2") == 0 ||
+        std::strcmp(pName, "vkGetPhysicalDeviceMemoryProperties2KHR") == 0)
+        return reinterpret_cast<PFN_vkVoidFunction>(xfsr_GetPhysicalDeviceMemoryProperties2);
     return nullptr;
 }
 
 PFN_vkVoidFunction resolveDevice(const char* pName) {
     if (std::strcmp(pName, "vkGetDeviceProcAddr") == 0)
         return reinterpret_cast<PFN_vkVoidFunction>(::xfsr_GetDeviceProcAddr);
+    if (std::strcmp(pName, "vkAllocateMemory") == 0)
+        return reinterpret_cast<PFN_vkVoidFunction>(xfsr_AllocateMemory);
+    if (std::strcmp(pName, "vkGetPhysicalDeviceMemoryProperties") == 0)
+        return reinterpret_cast<PFN_vkVoidFunction>(xfsr_GetPhysicalDeviceMemoryProperties);
+    if (std::strcmp(pName, "vkGetPhysicalDeviceMemoryProperties2") == 0 ||
+        std::strcmp(pName, "vkGetPhysicalDeviceMemoryProperties2KHR") == 0)
+        return reinterpret_cast<PFN_vkVoidFunction>(xfsr_GetPhysicalDeviceMemoryProperties2);
     if (std::strcmp(pName, "vkDestroyDevice") == 0)
         return reinterpret_cast<PFN_vkVoidFunction>(xfsr_DestroyDevice);
     if (std::strcmp(pName, "vkCreateSampler") == 0)

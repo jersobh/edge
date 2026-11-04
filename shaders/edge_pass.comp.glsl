@@ -210,6 +210,33 @@ vec3 edgeUpscaleQuality(vec2 uv, vec2 renderSize, float scale, float sharp) {
     return beautifyColor(finalEdge);
 }
 
+// High-Quality Downsampling / Supersampling Filter (DSR / SSAA):
+// When rendering at 4K or 1440p on a 1080p display (renderSize > displaySize),
+// each display pixel covers multiple texels of the rendered frame.
+// Uses a 4-tap staggered bilinear box filter covering up to a 4x4 texel area,
+// followed by optional Contrast-Adaptive Sharpening to produce razor-sharp,
+// anti-aliased SSAA output without shimmer.
+vec3 edgeDownsample(vec2 uv, vec2 renderSize, float sharp) {
+    vec2 texel = 1.0 / renderSize;
+    vec2 off = texel * 0.5;
+    vec3 s0 = sampleLod(uv + vec2(-off.x, -off.y));
+    vec3 s1 = sampleLod(uv + vec2( off.x, -off.y));
+    vec3 s2 = sampleLod(uv + vec2(-off.x,  off.y));
+    vec3 s3 = sampleLod(uv + vec2( off.x,  off.y));
+    vec3 avg = (s0 + s1 + s2 + s3) * 0.25;
+
+    if (sharp > 0.01) {
+        vec3 minC = min(min(s0, s1), min(s2, s3));
+        vec3 maxC = max(max(s0, s1), max(s2, s3));
+        float contrast = luma(maxC) - luma(minC);
+        if (contrast > 0.01) {
+            vec3 highPass = avg - (minC + maxC) * 0.5;
+            avg = clamp(avg + highPass * (sharp * 0.4), minC, maxC);
+        }
+    }
+    return beautifyColor(avg);
+}
+
 void main() {
     ivec2 dst = ivec2(gl_GlobalInvocationID.xy);
     int dw = int(u.sizes.z + 0.5);
@@ -226,7 +253,10 @@ void main() {
 
     vec2 uv = (vec2(dst) + 0.5) / displaySize;
     vec3 rgb;
-    if (mode == 2) {
+    if (renderSize.x > displaySize.x * 1.01) {
+        // Render size is larger than display size: downsample / supersample (e.g. 4K -> 1080p SSAA)
+        rgb = edgeDownsample(uv, renderSize, sharp);
+    } else if (mode == 2) {
         rgb = edgeUpscaleNearest(uv, renderSize);
     } else if (mode == 1) {
         rgb = edgeUpscalePerf(uv, renderSize, sharp);

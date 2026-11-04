@@ -225,10 +225,9 @@ Upscaler parseUpscaler(const char* s) {
 }
 
 uint32_t renderDim(uint32_t display, float scale) {
-    const float s = scale < 1.01f ? 1.f : scale;
+    const float s = (scale < 0.125f || (scale >= 0.99f && scale <= 1.01f)) ? 1.f : scale;
     uint32_t r = static_cast<uint32_t>(static_cast<float>(display) / s + 0.5f);
     if (r < 64) r = 64;
-    if (r > display) r = display;
     return r;
 }
 
@@ -1352,7 +1351,7 @@ void initFromEnv() {
             }
         }
         v += frac;
-        if (v >= 1.01f && v <= 8.f) {
+        if (v >= 0.125f && v <= 8.f) {
             g_rt.scale = v;
             g_rt.presetIdx = presetIndexFromScale(v);
         } else {

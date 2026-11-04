@@ -22,7 +22,7 @@ Wrap your game launch in Steam with `edgerun %command%` to render lower and reco
 </p>
 <p align="center"><a href="https://youtu.be/JAZmOpItF34">Watch the demo on YouTube</a></p>
 
-**Current version:** [0.9.0](https://github.com/jersobh/edge/releases/tag/v0.9.0)  
+**Current version:** [0.10.0](https://github.com/jersobh/edge/releases/tag/v0.10.0)  
 *(Formerly known as `xfsr`; `xfsr-run` and `XFSR_*` env vars remain as aliases.)*
 
 **Documentation & Deep-Dive:**
@@ -48,6 +48,7 @@ You do **not** need the game to have built-in upscaling. EdgeScale hooks in thro
 ```text
 edgerun --preset performance %command%
 edgerun --hybrid --preset performance %command%
+edgerun --dsr 4k --spoof-vram 8GB %command%
 edgerun --any --preset performance --gamescope-fs %command%
 edgerun --output 3840x2160 --render 1280x720 --upscaler nearest %command%
 ```
@@ -105,6 +106,26 @@ Manual sizes override presets:
 edgerun --output 3840x2160 --render 1280x720 --upscaler edge %command%
 ```
 
+### Supersampling / DSR (4K on a 1080p Display)
+
+EdgeScale also supports supersampling / downsampling (Virtual Super Resolution / DSR / SSAA):
+```text
+edgerun --dsr 4k %command%
+edgerun --dsr 1440p %command%
+```
+The game renders internally at full 4K (3840×2160) or 1440p, and EdgeScale downsamples to your 1080p display using a multi-tap box filter + Contrast-Adaptive Sharpening, delivering pristine anti-aliased geometry and micro-detail with zero shimmering.
+
+### VRAM Capacity Spoofing & Oversubscription
+
+For GPUs with 4GB or 6GB of VRAM where games artificially lock out High / Ultra textures or fail budget queries:
+```text
+edgerun --spoof-vram 8GB %command%
+edgerun --spoof-vram 12GB %command%
+```
+- **Heap & Budget Spoofing:** Intercepts `vkGetPhysicalDeviceMemoryProperties`, `vkGetPhysicalDeviceMemoryProperties2`, and `VK_EXT_memory_budget` to present a larger local VRAM capacity to the game.
+- **Graceful Host Spilling:** Intercepts `vkAllocateMemory` — if physical local VRAM is exhausted (`VK_ERROR_OUT_OF_DEVICE_MEMORY`), it automatically falls back to allocating over PCIe in system RAM (`HOST_VISIBLE`) instead of crashing the game.
+*(Note: Pushing textures far beyond physical VRAM capacity can cause PCIe bus stutter).*
+
 `--no-rcas` disables the optional sharpening pass on upscalers that support it — often a bit more FPS, slightly softer image.
 
 ## Install
@@ -143,38 +164,65 @@ A versioned `.tar.gz` is also provided under Releases for custom packaging.
 
 ### Windows (Setup.exe — recommended)
 
-1. Download `EdgeScale-*-Setup.exe` from [Releases](https://github.com/jersobh/edge/releases/latest).
-2. Run the installer (per-user → `%LOCALAPPDATA%\EdgeScale`, registers the Vulkan implicit layer).
-3. Uninstall via **Settings → Apps** (or the Start Menu uninstaller).
+1. Download **`EdgeScale-*-Setup.exe`** from [Releases](https://github.com/jersobh/edge/releases/latest).
+2. Run the installer:
+   - Installs per-user to `%LOCALAPPDATA%\EdgeScale` and registers the Vulkan implicit layer in the registry.
+   - **Recommended:** Check the box **"Set user environment variable ENABLE_EDGESCALE=1"** during setup to enable EdgeScale globally for all Vulkan games.
+3. Uninstall anytime via **Windows Settings → Apps** (or Start Menu → Uninstall EdgeScale).
 
-Fallback: extract `edgescale-windows-x86_64.zip` and run `install-windows.bat` / `uninstall-windows.bat`.
+*Fallback:* Extract `edgescale-windows-x86_64.zip` and run `install-windows.bat` / `uninstall-windows.bat`.
 
-#### Enabling EdgeScale
-- **In Steam (Windows):** Right-click game → **Properties** → **Launch Options**:
+#### Enabling EdgeScale on Windows
+
+Because EdgeScale is an implicit Vulkan layer, it activates when the environment variable `ENABLE_EDGESCALE=1` is set:
+
+- **System-Wide / All Games (Recommended):**  
+  If you didn't check the installer box, open Command Prompt or PowerShell once:
   ```cmd
-  cmd /c "set ENABLE_EDGESCALE=1 && %command%"
+  setx ENABLE_EDGESCALE 1
+  setx EDGESCALE_OVERLAY 1
   ```
-- **From Command Prompt (CMD):**
+  *(Restart Steam or your game after running this so the new environment variables take effect).*
+
+- **Per-Game in Steam (Windows):**  
+  Right-click the game in Steam → **Properties...** → **Launch Options**:
+  ```cmd
+  cmd /c "set ENABLE_EDGESCALE=1&& set EDGESCALE_OVERLAY=1&& %command%"
+  ```
+
+- **Per-Session in Terminal:**
   ```cmd
   set ENABLE_EDGESCALE=1
+  set EDGESCALE_OVERLAY=1
   game.exe
   ```
-- **From PowerShell:**
-  ```powershell
-  $env:ENABLE_EDGESCALE=1
-  .\game.exe
-  ```
 
-#### In-Game Hotkeys
-Control upscaling in real time without relaunching:
-- **F1**: Cycle scaling preset (`quality` → `balanced` → `performance` → `ultra`)
-- **F2**: Toggle sharpening or Edge reconstruction mode (`quality` → `perf` → `nearest` pixel art)
-- **F3**: Cycle upscaler (`edge` → `fsr1` → `blit` → `nearest` → `nis`)
-- **F10**: Toggle HUD overlay pinning
+#### Important: Vulkan vs. DirectX on Windows
 
-#### Compatibility on Windows
-- **Native Vulkan Games:** DOOM Eternal, Baldur's Gate 3 (Vulkan), No Man's Sky, Red Dead Redemption 2 (Vulkan mode), Rainbow Six Siege (Vulkan), etc.
-- **DirectX Games via DXVK:** Drop DXVK (`dxgi.dll`, `d3d11.dll`, or `d3d9.dll`) into the game folder; EdgeScale intercepts the resulting Vulkan swapchain with near-zero latency.
+> [!IMPORTANT]
+> EdgeScale is an in-process **Vulkan layer**. On Windows, games run on **DirectX (Direct3D 9/11/12)** by default, not Vulkan!
+> 
+> - **Native Vulkan Games (Works out of the box):**  
+>   Games that natively support Vulkan run with EdgeScale directly. Examples:  
+>   *Counter-Strike 2*, *DOOM (2016)*, *DOOM Eternal*, *Baldur's Gate 3* (select Vulkan in the launcher), *No Man's Sky*, *Red Dead Redemption 2* (switch API to Vulkan in Graphics settings), *Rainbow Six Siege* (launch `RainbowSix_Vulkan.exe`), *The Talos Principle*, *Dota 2*.
+> - **DirectX 9 / 10 / 11 Games (Use DXVK):**  
+>   To use EdgeScale with DirectX games on Windows, download the latest 64-bit [DXVK release](https://github.com/doitsujin/dxvk/releases) and place `dxgi.dll` and `d3d11.dll` (or `d3d9.dll`) directly in the same folder as the game's executable. DXVK routes rendering through Vulkan, where EdgeScale intercepts and upscales frames.
+
+#### In-Game Hotkeys & HUD Overlay
+
+- **F10**: **Pin / Unpin HUD Overlay**. *(The overlay is unpinned by default unless `EDGESCALE_OVERLAY=1` is set; press `F10` to keep the stats strip on screen).*
+- **F1**: Cycle scaling preset (`quality` 1.5× → `balanced` 1.7× → `performance` 2.0× → `ultra` 2.5×)
+- **F2**: Cycle EdgePass mode (`quality` → `perf` → `nearest` pixel art) or toggle RCAS sharpening
+- **F3**: Cycle spatial upscaler (`edge` → `fsr1` → `blit` → `nearest` → `nis`)
+
+#### Quick Smoke Test
+Verify your Windows installation in seconds:
+```cmd
+set ENABLE_EDGESCALE=1
+set EDGESCALE_OVERLAY=1
+vkcube
+```
+*(Requires the Vulkan SDK or runtime installed; `vkcube` will spin with the EdgeScale HUD strip overlaid across the top).*
 
 ## Steam
 
@@ -240,6 +288,8 @@ edgerun --layer-dir ./build --check
 | `--preset quality\|balanced\|performance\|ultra` | How much to lower render resolution (`ultra` = 2.5×) |
 | `--output WxH` | Present / display size (default: auto-detect primary display) |
 | `--render WxH` | Absolute internal render size (overrides preset-derived scale) |
+| `--dsr 4k\|1440p\|<val>` | Supersampling / Virtual Super Resolution downsampling (e.g. 4K on 1080p display) |
+| `--spoof-vram [SIZE]` | Spoof reported VRAM capacity (e.g. `8GB`, `12GB`, `auto`) and enable host RAM spilling |
 | `--blit` | Same scale, linear blit (no spatial upscaler) |
 | `--upscaler blit\|nearest\|nis\|edge\|fsr1` | Spatial upscaler (`nearest` = pixel art; `edge` = recommended) |
 | `--edge-mode quality\|perf\|nearest` | EdgePass mode: quality (sub-pixel edge tangent + CAS), perf/lite, or nearest (2D pixel art) |
@@ -334,6 +384,8 @@ EdgeScale uses **`EDGESCALE_*`** (or `EDGE_*`) environment variables. Legacy **`
 | `EDGESCALE_IGPU_PRESENT=force` | One-way even if MangoHud is still loaded (warning: may SIGSEGV with MangoHud) |
 | `EDGESCALE_OUTPUT_W` / `_H` | Target display / presentation resolution (overrides auto-detection) |
 | `EDGESCALE_RENDER_W` / `_H` | Internal rendering resolution (overrides preset calculation) |
+| `EDGESCALE_DSR` | Downsampling / Virtual Super Resolution target preset (`4k`, `1440p`, or scale factor) |
+| `EDGESCALE_SPOOF_VRAM` | Spoofed VRAM capacity reported to Vulkan apps (`8GB`, `12GB`, `16GB`, `auto`) |
 | `EDGESCALE_HUD=0` | Disable in-game hotkeys and toast messages |
 | `EDGESCALE_OVERLAY=1` | Pin HUD status strip at launch (same as `--overlay`) |
 | `EDGESCALE_HUD_MOD=1` | Require Shift+F* for hotkeys (default: bare F-keys) |
@@ -367,12 +419,12 @@ Needs CMake ≥ 3.20, C++17, `glslc`, Vulkan loader, and `libx11-dev` (GL shim X
 
 ## Versioning
 
-- [`VERSION`](VERSION) — **0.9.0**
+- [`VERSION`](VERSION) — **0.10.0**
 - [`CHANGELOG.md`](CHANGELOG.md)
 - Tag `vX.Y.Z` → GitHub Actions builds Linux AppImage + tarball and Windows Setup.exe + ZIP
 
 ```sh
-git tag v0.9.0 && git push origin v0.9.0
+git tag v0.10.0 && git push origin v0.10.0
 ```
 
 ## Credits

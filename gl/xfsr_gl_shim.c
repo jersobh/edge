@@ -82,7 +82,7 @@ static void load_extents(void) {
     g_rw = rw ? atoi(rw) : 0;
     g_rh = rh ? atoi(rh) : 0;
     g_scale = sc ? strtof(sc, NULL) : 0.f;
-    if (g_scale < 1.01f) g_scale = 0.f;
+    if (g_scale < 0.125f || (g_scale >= 0.99f && g_scale <= 1.01f)) g_scale = 0.f;
     if (!g_ready && getenv("XFSR_VERBOSE")) {
         fprintf(stderr, "[xfsr-gl] shim scale=%.2f render=%dx%d display_hint=%dx%d\n",
                 g_scale, g_rw, g_rh, g_dw, g_dh);
@@ -104,7 +104,7 @@ static void target_render_size(int win_w, int win_h, int* out_rw, int* out_rh) {
         *out_rh = g_rh;
         return;
     }
-    if (g_scale >= 1.01f) {
+    if (g_scale >= 1.01f || (g_scale >= 0.125f && g_scale < 0.99f)) {
         int rw = (int)(win_w / g_scale + 0.5f);
         int rh = (int)(win_h / g_scale + 0.5f);
         if (rw < 64) rw = 64;
@@ -201,7 +201,7 @@ static void remap_rect(GLint* x, GLint* y, GLsizei* w, GLsizei* h) {
 
     /* Prefer layer proxy size when EGL still looks window-sized (X11 Zink). */
     if (have_layer && win_w >= 64 && win_h >= 64 &&
-        (layer_w + near < win_w || layer_h + near < win_h)) {
+        (abs(layer_w - win_w) > near || abs(layer_h - win_h) > near)) {
         const int egl_is_window =
             have_egl && abs(dw - win_w) <= near && abs(dh - win_h) <= near;
         const int egl_is_render =
@@ -237,14 +237,14 @@ static void remap_rect(GLint* x, GLint* y, GLsizei* w, GLsizei* h) {
             const int in_window =
                 ox >= -near && oy >= -near && (int)ow >= 32 && (int)oh >= 32 &&
                 ox + (int)ow <= win_w + near && oy + (int)oh <= win_h + near &&
-                ((int)ow + near > layer_w || (int)oh + near > layer_h || ox > near ||
+                (abs((int)ow - layer_w) > near || abs((int)oh - layer_h) > near || ox > near ||
                  oy > near);
             if (in_window) {
                 /* Window-space letterbox (both axes > render) or a fixed design
                  * viewport (BunnyForest 512² — may be taller than layer_h after
                  * caps-shrink): fill the render image so present is not a stamp. */
                 const int letterbox_gt_layer =
-                    (int)ow + near > layer_w && (int)oh + near > layer_h;
+                    layer_w < win_w && (int)ow + near > layer_w && (int)oh + near > layer_h;
                 /* ≤¾ of window on both axes (512² in 1280×720: 2× height fails). */
                 const int small_vs_win =
                     (int)ow * 4 <= win_w * 3 && (int)oh * 4 <= win_h * 3;
@@ -303,8 +303,8 @@ static void remap_rect(GLint* x, GLint* y, GLsizei* w, GLsizei* h) {
         /* Identity: drawable still window-sized and no live proxy → do not shrink. */
         if (abs(dw - win_w) <= near && abs(dh - win_h) <= near) return;
 
-        /* Caps-shrunk drawable: scale window-space rects into the EGL image. */
-        if (dw + near < win_w || dh + near < win_h) {
+        /* Scaled drawable: scale window-space rects into the EGL image. */
+        if (abs(dw - win_w) > near || abs(dh - win_h) > near) {
             const int covers_win =
                 (ox <= near && oy <= near && abs((int)*w - win_w) <= near &&
                  abs((int)*h - win_h) <= near);
@@ -312,7 +312,8 @@ static void remap_rect(GLint* x, GLint* y, GLsizei* w, GLsizei* h) {
                 (ox <= near && oy <= near && g_dw > 0 && g_dh > 0 &&
                  abs((int)*w - g_dw) <= near && abs((int)*h - g_dh) <= near);
             const int covers_drawable =
-                (ox <= near && oy <= near && (int)*w + near >= dw && (int)*h + near >= dh);
+                (ox <= near && oy <= near && (abs((int)*w - dw) <= near || (int)*w + near >= dw) &&
+                 (abs((int)*h - dh) <= near || (int)*h + near >= dh));
             if (covers_win || covers_display || covers_drawable) {
                 if (x) *x = 0;
                 if (y) *y = 0;
@@ -329,7 +330,7 @@ static void remap_rect(GLint* x, GLint* y, GLsizei* w, GLsizei* h) {
             const int in_window =
                 ox >= -near && oy >= -near && (int)ow >= 32 && (int)oh >= 32 &&
                 ox + (int)ow <= win_w + near && oy + (int)oh <= win_h + near &&
-                ((int)ow + near > dw || (int)oh + near > dh || ox > near || oy > near);
+                (abs((int)ow - dw) > near || abs((int)oh - dh) > near || ox > near || oy > near);
             if (in_window) {
                 if (x) *x = (GLint)scale_axis(ox, win_w, dw);
                 if (y) *y = (GLint)scale_axis(oy, win_h, dh);
@@ -542,12 +543,12 @@ XFSR_EXPORT void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint 
         const int bw = dx1 - dx0;
         const int bh = dy1 - dy0;
         if (win_w >= 64 && win_h >= 64 && dst_w >= 64 && dst_h >= 64 &&
-            (dst_w + 2 < win_w || dst_h + 2 < win_h) && bw > 32 && bh > 32 && dx0 >= -2 &&
+            (abs(dst_w - win_w) > 2 || abs(dst_h - win_h) > 2) && bw > 32 && bh > 32 && dx0 >= -2 &&
             dy0 >= -2 && dx1 <= win_w + 2 && dy1 <= win_h + 2 &&
-            (bw + 2 > dst_w || bh + 2 > dst_h || dx0 > 2 || dy0 > 2)) {
+            (abs(bw - dst_w) > 2 || abs(bh - dst_h) > 2 || dx0 > 2 || dy0 > 2)) {
             /* Same rule as remap_rect: letterbox fill, design blit, or square
              * stamp left in a shrunk drawable after FB size lies. */
-            const int letterbox_gt_dst = (bw + 2 > dst_w && bh + 2 > dst_h);
+            const int letterbox_gt_dst = (dst_w < win_w && bw + 2 > dst_w && bh + 2 > dst_h);
             const int design_blit = bw * 4 <= win_w * 3 && bh * 4 <= win_h * 3 && dx0 <= 2 &&
                                    (dy0 <= 2 || abs(dy0 + bh - win_h) <= 3);
             const int stamp_blit = abs(bw - bh) <= 10 && dx0 <= 2 && dy0 <= 2 &&
@@ -586,7 +587,7 @@ static void remap_drawable_query(int* width, int* height) {
      * stay in sync with WSI. remap_rect maps window space → layer. */
     if (!x11_lie_wanted()) return;
     int lw = 0, lh = 0;
-    if (layer_remap_size(&lw, &lh) && lw + 2 < g_fb_w && lh + 2 < g_fb_h) {
+    if (layer_remap_size(&lw, &lh) && (abs(lw - g_fb_w) > 2 || abs(lh - g_fb_h) > 2)) {
         *width = lw;
         *height = lh;
         return;
@@ -594,7 +595,7 @@ static void remap_drawable_query(int* width, int* height) {
     int dw = 0, dh = 0;
     if (!query_egl_drawable(&dw, &dh)) return;
     if (abs(dw - g_fb_w) <= 2 && abs(dh - g_fb_h) <= 2) return;
-    if (dw + 2 < g_fb_w && dh + 2 < g_fb_h) {
+    if (abs(dw - g_fb_w) > 2 || abs(dh - g_fb_h) > 2) {
         *width = dw;
         *height = dh;
     }
@@ -692,7 +693,7 @@ static int shrink_wl_size(int* width, int* height) {
     int rw = 0, rh = 0;
     target_render_size(win_w, win_h, &rw, &rh);
     if (rw <= 0 || rh <= 0) return 0;
-    if (rw >= win_w && rh >= win_h) return 0;
+    if (abs(rw - win_w) <= 2 && abs(rh - win_h) <= 2) return 0;
     publish_window_hint(win_w, win_h, rw, rh);
     *width = rw;
     *height = rh;
@@ -841,18 +842,18 @@ static int x11_size_is_game_window(int real_w, int real_h, int lw, int lh) {
     if (g_fb_w >= 64 && abs(real_w - g_fb_w) <= near && abs(real_h - g_fb_h) <= near)
         return 1;
     if (g_dw >= 64 && abs(real_w - g_dw) <= near && abs(real_h - g_dh) <= near) return 1;
-    if (g_scale >= 1.01f) {
+    if (g_scale >= 1.01f || (g_scale >= 0.125f && g_scale < 0.99f)) {
         const int expect_w = (int)((float)lw * g_scale + 0.5f);
         const int expect_h = (int)((float)lh * g_scale + 0.5f);
         if (abs(real_w - expect_w) <= near && abs(real_h - expect_h) <= near) return 1;
     }
     /* Fullscreen-ish window: same aspect as render image, not multi-monitor wide. */
-    if (lw >= 64 && lh >= 64 && real_w > lw && real_h > lh) {
+    if (lw >= 64 && lh >= 64 && (abs(real_w - lw) > near || abs(real_h - lh) > near)) {
         const long aspect_r = (long)real_w * (long)lh;
         const long aspect_l = (long)lw * (long)real_h;
         const int aspect_ok = aspect_r > aspect_l - aspect_l / 20 &&
                               aspect_r < aspect_l + aspect_l / 20;
-        const int not_desktop = real_w < lw * 3 && real_h < lh * 3;
+        const int not_desktop = (real_w < lw * 3 && real_h < lh * 3) || (lw < real_w * 3 && lh < real_h * 3);
         if (aspect_ok && not_desktop) return 1;
     }
     return 0;
@@ -870,7 +871,7 @@ static int x11_lie_size(int real_w, int real_h, int* out_w, int* out_h) {
     load_extents();
     int lw = 0, lh = 0;
     /* Only while a proxy is live — never scale-lie early desktop/root queries. */
-    if (!layer_remap_size(&lw, &lh) || lw + 2 >= real_w || lh + 2 >= real_h) return 0;
+    if (!layer_remap_size(&lw, &lh) || (abs(lw - real_w) <= 2 && abs(lh - real_h) <= 2)) return 0;
     if (!x11_size_is_game_window(real_w, real_h, lw, lh)) return 0;
     publish_window_hint(real_w, real_h, lw, lh);
     *out_w = lw;
@@ -882,10 +883,10 @@ static void x11_scale_xy(int* x, int* y) {
     if (!x11_lie_wanted()) return;
     if (!x || !y || g_fb_w < 64 || g_fb_h < 64) return;
     int lw = 0, lh = 0;
-    if (!layer_remap_size(&lw, &lh) || lw + 2 >= g_fb_w || lh + 2 >= g_fb_h) {
+    if (!layer_remap_size(&lw, &lh) || (abs(lw - g_fb_w) <= 2 && abs(lh - g_fb_h) <= 2)) {
         load_extents();
         target_render_size(g_fb_w, g_fb_h, &lw, &lh);
-        if (lw < 64 || lh < 64 || lw + 2 >= g_fb_w) return;
+        if (lw < 64 || lh < 64 || (abs(lw - g_fb_w) <= 2 && abs(lh - g_fb_h) <= 2)) return;
     }
     *x = scale_axis(*x, g_fb_w, lw);
     *y = scale_axis(*y, g_fb_h, lh);

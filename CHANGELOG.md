@@ -6,6 +6,30 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
 
+## [Unreleased]
+
+## [0.10.0] — 2026-11-04
+
+### Added
+
+- **VRAM Capacity Spoofing & Oversubscription Fallback** (`--spoof-vram [SIZE]` / `EDGESCALE_SPOOF_VRAM`):
+  - Intercepts `vkGetPhysicalDeviceMemoryProperties` and `vkGetPhysicalDeviceMemoryProperties2` to report expanded `DEVICE_LOCAL` VRAM capacity (e.g. 8GB, 12GB, 16GB, or `auto`).
+  - Transparently intercepts `VK_EXT_memory_budget` (`VkPhysicalDeviceMemoryBudgetPropertiesEXT`) so modern engines (DXVK / VKD3D-Proton / Unreal) see increased VRAM budget instead of locking out High/Ultra textures.
+  - Implements graceful allocation spilling in `vkAllocateMemory`: when physical local VRAM is exhausted (`VK_ERROR_OUT_OF_DEVICE_MEMORY`), automatically falls back to allocating over PCIe in system RAM (`HOST_VISIBLE`) instead of crashing the application.
+  - Profile key: `spoof_vram=8GB`.
+- **Supersampling / DSR (4K Render on 1080p Display)** (`--dsr 4k|1440p|<val>` / `--render 3840x2160 --output 1920x1080`):
+  - Enables true downsampling / Virtual Super Resolution (DSR / SSAA) in the Vulkan layer: the game renders internally at 4K (3840×2160) or 1440p, while the swapchain presents at native monitor resolution (e.g. 1080p).
+  - Shipped dedicated `edgeDownsample` compute shader in `shaders/edge_pass.comp.glsl`: 4-tap staggered bilinear box filter covering up to a 4×4 texel area, combined with optional Contrast-Adaptive Sharpening (CAS) for clean, anti-aliased SSAA without shimmering.
+  - Automatic positive mip LOD bias calculation (`-log2(scale) = +1.0` at 4K→1080p) to match high-resolution texture sampling to display pixel density and eliminate texture crawling.
+  - Profile key: `dsr=4k`.
+
+### Fixed
+
+- **OpenGL / Zink Bidirectional Viewport & Downsampling Remapping**:
+  - Fixed quarter-screen / bottom-left postage stamp rendering bug in `gl/xfsr_gl_shim.c` when downsampling or supersampling (DSR 4K / 1440p).
+  - Replaced unidirectional `render < window` assumptions across `glViewport`, `glScissor`, `glBlitFramebuffer`, `glfwGetFramebufferSize`, `SDL_GL_GetDrawableSize`, and X11 window queries with bidirectional delta checks (`abs(...) > threshold`).
+  - Allowed downsampling scale factors down to `0.125f` (e.g. `scale=0.50` for 4K → 1080p SSAA) in `target_render_size`, `load_extents`, and `shrink_wl_size`.
+
 ## [0.9.0] — 2026-11-02
 
 ### Added
@@ -394,7 +418,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - Dual-GPU `SURFACE_LOST` / early `OUT_OF_DATE` (opaque app handle + iGPU-only window WSI)
 - Caps-shrink vs Zink EGL drawable mismatch
 
-[Unreleased]: https://github.com/jersobh/edge/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/jersobh/edge/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/jersobh/edge/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/jersobh/edge/compare/v0.8.3...v0.9.0
 [0.8.3]: https://github.com/jersobh/edge/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/jersobh/edge/compare/v0.8.1...v0.8.2

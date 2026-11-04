@@ -81,6 +81,9 @@ ADAPTIVE="${EDGESCALE_ADAPTIVE:-${EDGE_ADAPTIVE:-${XFSR_ADAPTIVE:-0}}}"
 ADAPTIVE_CLI=0
 TARGET_FPS="${EDGESCALE_TARGET_FPS:-${EDGE_TARGET_FPS:-${XFSR_TARGET_FPS:-60}}}"
 TARGET_FPS_CLI=0
+SPOOF_VRAM="${EDGESCALE_SPOOF_VRAM:-${XFSR_SPOOF_VRAM:-}}"
+SPOOF_VRAM_CLI=0
+DSR_CLI=0
 PROFILE_NOTE=""
 NO_PROFILE=0
 
@@ -130,6 +133,8 @@ Options:
   --caps-shrink / --no-caps-shrink        Control surface capability shrinking (default: on)
   --adaptive / --no-adaptive              Dynamic resolution scaling toward --target-fps
   --target-fps N                          Adaptive target framerate (default: 60)
+  --dsr 4k|1440p|<val>                    Supersampling / downsample mode: render 4K/1440p on 1080p display (DSR/SSAA)
+  --spoof-vram [SIZE]                     Spoof VRAM capacity (e.g. 8GB, 12GB, auto) to unlock higher texture settings
   --zink / --no-zink                      Mesa Zink for OpenGL→Vulkan (default: auto)
   --mangohud / --hud                      Enable MangoHud overlay
   --igpu                                  Prefer iGPU as primary render device
@@ -150,6 +155,8 @@ scale_for_preset() {
     ultra|U|extreme) echo 2.5 ;;
     performance|perf|E) echo 2.0 ;;
     balanced|W) echo 1.7 ;;
+    dsr4k|4k) echo 0.5 ;;
+    dsr1440p|1440p) echo 0.75 ;;
     *) echo 1.5 ;;
   esac
 }
@@ -364,6 +371,25 @@ apply_profile_for_command() {
       target_fps|target-fps)
         if [[ $TARGET_FPS_CLI -eq 0 ]]; then TARGET_FPS="$val"; fi
         ;;
+      spoof_vram|spoof-vram)
+        if [[ $SPOOF_VRAM_CLI -eq 0 ]]; then SPOOF_VRAM="$val"; fi
+        ;;
+      dsr|downsample)
+        if [[ $DSR_CLI -eq 0 ]]; then
+          case "$val" in
+            4k|4K|2160p) RENDER_W=3840; RENDER_H=2160; RENDER_CLI=1 ;;
+            1440p|2k|2K) RENDER_W=2560; RENDER_H=1440; RENDER_CLI=1 ;;
+            1080p) RENDER_W=1920; RENDER_H=1080; RENDER_CLI=1 ;;
+            *x*) RENDER_W="${val%%x*}"; RENDER_H="${val##*x}"; RENDER_CLI=1 ;;
+            *)
+              m="${val%x}"; m="${m%X}"
+              RENDER_W="$(awk -v w="${OUT_W:-1920}" -v m="$m" 'BEGIN{printf "%d", w*m+0.5}')"
+              RENDER_H="$(awk -v h="${OUT_H:-1080}" -v m="$m" 'BEGIN{printf "%d", h*m+0.5}')"
+              RENDER_CLI=1
+              ;;
+          esac
+        fi
+        ;;
       zink)
         if [[ $ZINK_CLI -eq 0 ]]; then
           case "$val" in
@@ -540,6 +566,46 @@ while [[ $# -gt 0 ]]; do
     --target-fps)
       TARGET_FPS="${2:?}"; TARGET_FPS_CLI=1; shift 2 ;;
     --target-fps=*) TARGET_FPS="${1#*=}"; TARGET_FPS_CLI=1; shift ;;
+    --spoof-vram)
+      if [[ -n "${2:-}" && "${2:0:1}" != "-" ]]; then
+        SPOOF_VRAM="$2"; shift 2
+      else
+        SPOOF_VRAM="8GB"; shift
+      fi
+      SPOOF_VRAM_CLI=1
+      ;;
+    --spoof-vram=*)
+      SPOOF_VRAM="${1#*=}"; SPOOF_VRAM_CLI=1; shift ;;
+    --dsr|--downsample)
+      DSR_VAL="${2:?}"; DSR_CLI=1; shift 2
+      case "$DSR_VAL" in
+        4k|4K|2160p) RENDER_W=3840; RENDER_H=2160; RENDER_CLI=1 ;;
+        1440p|2k|2K) RENDER_W=2560; RENDER_H=1440; RENDER_CLI=1 ;;
+        1080p) RENDER_W=1920; RENDER_H=1080; RENDER_CLI=1 ;;
+        *x*) RENDER_W="${DSR_VAL%%x*}"; RENDER_H="${DSR_VAL##*x}"; RENDER_CLI=1 ;;
+        *)
+          m="${DSR_VAL%x}"; m="${m%X}"
+          RENDER_W="$(awk -v w="${OUT_W:-1920}" -v m="$m" 'BEGIN{printf "%d", w*m+0.5}')"
+          RENDER_H="$(awk -v h="${OUT_H:-1080}" -v m="$m" 'BEGIN{printf "%d", h*m+0.5}')"
+          RENDER_CLI=1
+          ;;
+      esac
+      ;;
+    --dsr=*|--downsample=*)
+      DSR_VAL="${1#*=}"; DSR_CLI=1; shift
+      case "$DSR_VAL" in
+        4k|4K|2160p) RENDER_W=3840; RENDER_H=2160; RENDER_CLI=1 ;;
+        1440p|2k|2K) RENDER_W=2560; RENDER_H=1440; RENDER_CLI=1 ;;
+        1080p) RENDER_W=1920; RENDER_H=1080; RENDER_CLI=1 ;;
+        *x*) RENDER_W="${DSR_VAL%%x*}"; RENDER_H="${DSR_VAL##*x}"; RENDER_CLI=1 ;;
+        *)
+          m="${DSR_VAL%x}"; m="${m%X}"
+          RENDER_W="$(awk -v w="${OUT_W:-1920}" -v m="$m" 'BEGIN{printf "%d", w*m+0.5}')"
+          RENDER_H="$(awk -v h="${OUT_H:-1080}" -v m="$m" 'BEGIN{printf "%d", h*m+0.5}')"
+          RENDER_CLI=1
+          ;;
+      esac
+      ;;
     --no-profile) NO_PROFILE=1; shift ;;
     --layer-dir)
       LAYER_DIR="${2:?}"; shift 2 ;;
@@ -906,14 +972,18 @@ fi
 
 SCALE="$(scale_for_preset "$PRESET")"
 if [[ $RENDER_CLI -eq 1 && "$RENDER_W" -ge 64 && "$RENDER_H" -ge 64 ]]; then
-  # Absolute internal resolution — derive scale from output÷render (cap 1.01..8).
+  # Absolute internal resolution — derive scale from output÷render (cap 0.125..8).
   SCALE="$(awk -v ow="$OUT_W" -v rw="$RENDER_W" 'BEGIN{
     s = (rw > 0) ? ow/rw : 1.5;
-    if (s < 1.01) s = 1.01;
+    if (s < 0.125) s = 0.125;
     if (s > 8.0) s = 8.0;
     printf "%.4f", s
   }')"
-  echo "edgerun: manual render ${RENDER_W}x${RENDER_H} → output ${OUT_W}x${OUT_H} (scale=$SCALE)" >&2
+  if awk -v s="$SCALE" 'BEGIN{exit !(s < 0.99)}'; then
+    echo "edgerun: DSR / supersampling active: render ${RENDER_W}x${RENDER_H} → display ${OUT_W}x${OUT_H} (SSAA, scale=$SCALE)" >&2
+  else
+    echo "edgerun: manual render ${RENDER_W}x${RENDER_H} → output ${OUT_W}x${OUT_H} (scale=$SCALE)" >&2
+  fi
 else
   RENDER_W="$(awk -v w="$OUT_W" -v s="$SCALE" 'BEGIN{printf "%d", w/s+0.5}')"
   RENDER_H="$(awk -v h="$OUT_H" -v s="$SCALE" 'BEGIN{printf "%d", h/s+0.5}')"
@@ -1137,10 +1207,18 @@ if [[ $SKIP_LAYER -eq 0 ]]; then
   export XFSR_OVERLAY="$OVERLAY"
   export XFSR_ADAPTIVE="$ADAPTIVE"
   export XFSR_TARGET_FPS="$TARGET_FPS"
+  if [[ -n "$SPOOF_VRAM" ]]; then
+    export EDGESCALE_SPOOF_VRAM="$SPOOF_VRAM"
+    export XFSR_SPOOF_VRAM="$SPOOF_VRAM"
+  fi
 else
   # gamescope path: keep UPSCALER for -F mapping; do not enable the layer.
   export XFSR_PRESET="$PRESET"
   export XFSR_RCAS="$RCAS"
+  if [[ -n "$SPOOF_VRAM" ]]; then
+    export EDGESCALE_SPOOF_VRAM="$SPOOF_VRAM"
+    export XFSR_SPOOF_VRAM="$SPOOF_VRAM"
+  fi
 fi
 # Keep MangoHud's implicit layer out of one-way processes (ambient MANGOHUD=1).
 # Skip when gamescope has the layer off — no opaque xfsr WSI, and we want a HUD.
@@ -1237,14 +1315,16 @@ elif [[ "${XFSR_UPSCALER:-}" == "fsr1" ]]; then
 fi
 _hy=""
 [[ $HYBRID -eq 1 ]] && _hy=" hybrid=1"
+_sv=""
+[[ -n "$SPOOF_VRAM" ]] && _sv=" spoof_vram=$SPOOF_VRAM"
 _gs=""
 [[ $USE_GAMESCOPE -eq 1 ]] && _gs=" gamescope=${RENDER_W}x${RENDER_H}→${OUT_W}x${OUT_H}"
 if [[ $SKIP_LAYER -eq 1 ]]; then
-  echo "xfsr-run: gamescope path (no Vulkan layer) preset=$PRESET scale=$SCALE mode=$_mode${_gs}" >&2
+  echo "edgerun: gamescope path (no Vulkan layer) preset=$PRESET scale=$SCALE mode=$_mode${_sv}${_gs}" >&2
 else
-  echo "xfsr-run: layer ${LAYER_DIR} (ENABLE_XFSR=1 preset=$PRESET scale=$SCALE mode=$_mode offload=$OFFLOAD${_ow_msg}${_hy}${_gs})" >&2
+  echo "edgerun: layer ${LAYER_DIR} (ENABLE_XFSR=1 preset=$PRESET scale=$SCALE mode=$_mode offload=$OFFLOAD${_ow_msg}${_hy}${_sv}${_gs})" >&2
 fi
-unset _ow_msg _mode _hy _gs
+unset _ow_msg _mode _hy _sv _gs
 if [[ $OFFLOAD -eq 1 && $PREFER_DGPU -eq 0 ]]; then
   echo "xfsr-run: warning: --igpu + --offload — app on integrated GPU; layer will skip dual-GPU and use same-GPU FSR. Drop --igpu for dGPU render → iGPU FSR." >&2
 fi
@@ -1420,6 +1500,8 @@ XFSR_CAPS_SHRINK=${XFSR_CAPS_SHRINK:-}
 XFSR_OVERLAY=${XFSR_OVERLAY:-}
 XFSR_ADAPTIVE=${XFSR_ADAPTIVE:-}
 XFSR_TARGET_FPS=${XFSR_TARGET_FPS:-}
+XFSR_SPOOF_VRAM=${XFSR_SPOOF_VRAM:-}
+EDGESCALE_SPOOF_VRAM=${EDGESCALE_SPOOF_VRAM:-}
 XFSR_DISPLAY_EXTENT=${XFSR_DISPLAY_EXTENT:-}
 XFSR_OUTPUT_W=${XFSR_OUTPUT_W:-}
 XFSR_OUTPUT_H=${XFSR_OUTPUT_H:-}
