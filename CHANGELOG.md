@@ -8,6 +8,18 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.11.1] — 2026-11-05
+
+### Added
+
+- **Dual-GPU In-Game Telemetry & Dynamic NVML Discovery (`--overlay`)**:
+  - Integrated dynamic runtime loading of `libnvidia-ml.so.1` (NVML) via `dlopen` to sample NVIDIA dGPU utilization percentage, temperature (°C), and VRAM usage (MB) without introducing build-time dependencies.
+  - Enhanced HUD overlay to distinguish and explicitly label multi-GPU topologies as `dGPU` and `iGPU` (e.g. `dGPU [GTX 1650]` and `iGPU [Vega 10 Graphics]`) alongside execution mode (`HYBRID`, `OFFLOAD`, `SAME-GPU`, `DSR 4K`), active upscaler, FPS, and CPU usage.
+  - Implemented dynamic bounding box rasterization in `rasterizeText` and `recordOverlay`: the semi-transparent overlay badge now fits text line count and width dynamically in the corner, preventing unnecessary darkening of unused screen areas.
+  - Hooked physical device property queries and companion discovery (`xfsr_ctrl::setDeviceInfo`) across device creation and offload pipeline setup in `layer/xfsr_layer.cpp`.
+- **Benchmark Suite Overlay Integration (`scripts/xfsr-bench.sh`)**:
+  - Enabled the built-in `--overlay` by default in automated benchmarks and removed reliance on MangoHud.
+
 ## [0.11.0] — 2026-11-05
 
 ### Added
@@ -451,7 +463,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - Dual-GPU `SURFACE_LOST` / early `OUT_OF_DATE` (opaque app handle + iGPU-only window WSI)
 - Caps-shrink vs Zink EGL drawable mismatch
 
-[Unreleased]: https://github.com/jersobh/edge/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/jersobh/edge/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/jersobh/edge/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/jersobh/edge/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/jersobh/edge/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/jersobh/edge/compare/v0.8.3...v0.9.0
