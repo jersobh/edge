@@ -189,6 +189,7 @@ struct Runtime {
     char igpuName[64] = "";
     bool hasDgpu = false;
     bool hasIgpu = false;
+    bool dgpuIsDiscrete = true;
     std::chrono::steady_clock::time_point lastPresent{};
     std::chrono::steady_clock::time_point lastScaleChange{};
     std::chrono::steady_clock::time_point toastUntil{};
@@ -623,6 +624,10 @@ void formatStatusLocked(char* out, size_t n) {
     char gpuBuf[256] = "";
     for (int i = 0; i < g_metrics.gpuN; ++i) {
         auto& g = g_metrics.gpus[i];
+        const char* tag = g.tag;
+        if (!g_rt.hasIgpu && !g_rt.dgpuIsDiscrete) {
+            tag = "iGPU";
+        }
         const char* name = g.name;
         if (std::strcmp(g.tag, "dGPU") == 0) {
             const char* s = g_rt.dgpuName[0] ? g_rt.dgpuName : g.name;
@@ -651,7 +656,7 @@ void formatStatusLocked(char* out, size_t n) {
         }
 
         if (i > 0) std::strncat(gpuBuf, " | ", sizeof(gpuBuf) - std::strlen(gpuBuf) - 1);
-        std::snprintf(piece, sizeof(piece), "%s [%s]%s", g.tag, name, metricsPart);
+        std::snprintf(piece, sizeof(piece), "%s [%s]%s", tag, name, metricsPart);
         std::strncat(gpuBuf, piece, sizeof(gpuBuf) - std::strlen(gpuBuf) - 1);
     }
 
@@ -1519,9 +1524,9 @@ void publishPresentStatus(const char* mode, uint32_t renderW, uint32_t renderH,
 }
 
 void setDeviceInfo(const char* dgpuName, const char* igpuName, bool dgpuIsDiscrete, bool hasIgpu) {
-    (void)dgpuIsDiscrete;
     initFromEnv();
     std::lock_guard<std::mutex> lock(g_rt.mu);
+    g_rt.dgpuIsDiscrete = dgpuIsDiscrete;
     if (dgpuName && dgpuName[0]) {
         std::snprintf(g_rt.dgpuName, sizeof(g_rt.dgpuName), "%s", dgpuName);
         g_rt.hasDgpu = true;

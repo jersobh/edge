@@ -75,7 +75,7 @@ if not defined ISCC_EXE if exist "C:\Program Files\Inno Setup 6\ISCC.exe" set "I
 
 if defined ISCC_EXE if "%SKIP_INNO%"=="" (
     echo [Optional] Building EdgeScale-Setup.exe with Inno Setup...
-    set "APP_VERSION=0.11.1"
+    set "APP_VERSION=0.11.2"
     if exist "VERSION" set /p APP_VERSION=<VERSION
     "%ISCC_EXE%" "/DMyAppVersion=!APP_VERSION!" "/DSourceDir=%CD%\%DIST_DIR%" "/DOutputDir=%CD%\dist" packaging\windows\edgescale.iss
     if !errorlevel! equ 0 (

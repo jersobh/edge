@@ -472,7 +472,7 @@ Needs CMake ≥ 3.20, C++17, `glslc`, Vulkan loader, and `libx11-dev` (GL shim X
 - Tag `vX.Y.Z` → GitHub Actions builds Linux AppImage + tarball and Windows Setup.exe + ZIP
 
 ```sh
-git tag v0.11.1 && git push origin v0.11.1
+git tag v0.11.2 && git push origin v0.11.2
 ```
 
 ## Credits

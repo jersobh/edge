@@ -84,6 +84,7 @@ TARGET_FPS_CLI=0
 SPOOF_VRAM="${EDGESCALE_SPOOF_VRAM:-${XFSR_SPOOF_VRAM:-}}"
 SPOOF_VRAM_CLI=0
 DSR_CLI=0
+AI_MODE=0
 PROFILE_NOTE=""
 NO_PROFILE=0
 
@@ -612,6 +613,8 @@ while [[ $# -gt 0 ]]; do
           ;;
       esac
       ;;
+    --ai|--split)
+      AI_MODE=1; OFFLOAD=0; shift ;;
     --no-profile) NO_PROFILE=1; shift ;;
     --layer-dir)
       LAYER_DIR="${2:?}"; shift 2 ;;
@@ -1806,6 +1809,39 @@ if [[ $USE_GAMESCOPE -eq 1 ]]; then
     echo "xfsr-run: load app window ${RENDER_W}x${RENDER_H} (match gamescope nest)" >&2
   fi
   unset _need_size _is_load _a
+fi
+
+if [[ $AI_MODE -eq 1 || "${1:-}" == *"llama"* || "${1:-}" == *"whisper"* ]]; then
+  export XFSR_OFFLOAD=0
+  unset MESA_VK_DEVICE_SELECT 2>/dev/null || true
+  has_split=0
+  for a in "$@"; do
+    case "$a" in
+      --device|-dev|--tensor-split|-ts|--split-mode|-sm) has_split=1; break ;;
+    esac
+  done
+  if [[ $has_split -eq 0 && ("${1:-}" == *"llama"* || "${1:-}" == "llama-cli" || "${1:-}" == "llama-server") ]]; then
+    dev_out="$("$1" --list-devices 2>/dev/null || true)"
+    dgpu_id=""
+    igpu_id=""
+    while IFS= read -r line; do
+      if [[ "$line" =~ (Vulkan[0-9]+): ]]; then
+        vid="${BASH_REMATCH[1]}"
+        if [[ "$line" =~ NVIDIA|GeForce|Radeon\ RX ]]; then
+          dgpu_id="$vid"
+        elif [[ "$line" =~ AMD|Vega|Intel|Integrated|RADV ]]; then
+          igpu_id="$vid"
+        fi
+      fi
+    done <<< "$dev_out"
+    if [[ -n "$dgpu_id" && -n "$igpu_id" && "$dgpu_id" != "$igpu_id" ]]; then
+      echo "edgerun: [AI Orchestrator] Heterogeneous multi-GPU compute detected: primary $dgpu_id (dGPU), secondary $igpu_id (iGPU)" >&2
+      echo "edgerun: [AI Orchestrator] Auto-scheduling pipeline layer split (--device $dgpu_id,$igpu_id --split-mode layer --tensor-split 2,1)" >&2
+      cmd_exe="$1"
+      shift
+      set -- "$cmd_exe" --device "$dgpu_id,$igpu_id" --split-mode layer --tensor-split 2,1 "$@"
+    fi
+  fi
 fi
 
 if [[ $USE_GAMESCOPE -eq 1 ]]; then
