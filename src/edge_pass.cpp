@@ -153,7 +153,7 @@ void EdgePass::init(DeviceContext* deviceCtx) {
         setMode(parseEdgeModeEnv(e));
     }
     std::printf("EdgePass on %s: sharpness=%.2f mode=%s\n", ctx->props.deviceName, sharpness,
-                perfMode ? "perf" : "quality");
+                perfMode ? "perf" : (edgeMode == 2 ? "nearest" : "quality"));
 
     VkDescriptorSetLayoutBinding binds[4]{};
     binds[0].binding = 0;

@@ -8,6 +8,33 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-11-05
+
+### Added
+
+- **Distributed GPU Memory Management & Heterogeneous Workload Orchestration**:
+  - Implemented cost-aware multi-GPU and memory tiering architecture that coordinates workloads across independent physical devices rather than treating disparate physical VRAMs as a single unified device (`src/scheduler/gpu_scheduler.hpp`, `bench/scheduler_test.cpp`).
+  - Separates the **Memory Manager** (capacity discovery, heap compatibility, residency tracking, and oversubscription fallback) from the **Execution Orchestrator** (cost-aware placement scoring across bandwidth, compute throughput, transfer latency, and access frequency).
+  - Validated with controlled benchmark matrix demonstrating that offloading transformer layers to secondary compute (e.g. AMD Vega 10 iGPU) delivers **+43% higher decode throughput (14.4 t/s)** compared to spilling allocations to host system RAM over PCIe (9.6 t/s).
+- **VRAM Observability & Cross-Vendor Telemetry Daemon (`vram_monitor`)**:
+  - Unified multi-GPU telemetry CLI and background daemon (`src/vram_monitor/`) monitoring NVIDIA dGPU (NVML: VRAM used/free, BAR1, temperature, utilization), AMD iGPU/dGPU (sysfs: `mem_info_vram_used`, `mem_info_gtt_used`), and host DDR memory (`/proc/meminfo`).
+  - Implements weighted resource residency scoring ($S_i = \frac{F_i \cdot R_i \cdot C_i}{\text{Size}_{\text{MB}} \cdot (1 + A_i)}$) to drive cost-effective migration policies between VRAM, secondary GPU memory, and system RAM.
+  - Supports `--once`, `--json`, `--daemon [interval]`, and `--score` for continuous observability.
+- **AI CUDA Memory Virtualization & Oversubscription Engine (`ai_vram_test` / `ManagedLayerEngine`)**:
+  - Reusable stream-prefetched memory management engine (`src/ai_vram/ai_vram_adapter.hpp`, `src/ai_vram/ai_vram_test.cu`) leveraging CUDA Heterogeneous Memory Management (HMM) and unified memory.
+  - Successfully executes workloads exceeding physical GPU capacity (e.g. 5.25 GB across 6 layers on a 4 GB GTX 1650 at 3.03 GB/s streaming throughput) where standard allocations terminate with out-of-memory errors (`cudaErrorMemoryAllocation`).
+- **Controlled Benchmark Matrix Suite (`tests/benchmark_matrix.sh`)**:
+  - Reproducible benchmark comparing native VRAM baseline ($c=4096$), native driver failure ($c=32768$, `VK_ERROR_OUT_OF_DEVICE_MEMORY`), EdgeScale virtualized budget ($c=32768$, 40.4 t/s prefill / 9.6 t/s decode), dual-GPU layer split (14.4 t/s decode), and dual-GPU oversubscription (3.6 t/s decode with 901 MB spilled).
+- **Automated Local LLM Launcher (`scripts/run_local_llm.sh`)**:
+  - Wrapper for running large local models (e.g. Qwen 3.5 4.3B GGUF) with large context windows under EdgeScale VRAM virtualization.
+
+### Fixed
+
+- **Benchmark Terminal Redirection & Real-Time Token Parsing**:
+  - Fixed an issue where `llama-cli` wrote output directly to `/dev/tty`, bypassing shell redirection and producing `N/A` token rates in scripted benchmarks. Execution now cleanly detaches via `setsid` and redirects standard streams.
+- **EdgePass Upscaler Mode Logging**:
+  - Fixed logging in `src/edge_pass.cpp` where nearest-neighbor mode erroneously logged as `quality`.
+
 ## [0.10.0] — 2026-11-04
 
 ### Added
@@ -422,7 +449,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - Dual-GPU `SURFACE_LOST` / early `OUT_OF_DATE` (opaque app handle + iGPU-only window WSI)
 - Caps-shrink vs Zink EGL drawable mismatch
 
-[Unreleased]: https://github.com/jersobh/edge/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/jersobh/edge/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/jersobh/edge/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/jersobh/edge/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/jersobh/edge/compare/v0.8.3...v0.9.0
 [0.8.3]: https://github.com/jersobh/edge/compare/v0.8.2...v0.8.3

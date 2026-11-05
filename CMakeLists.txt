@@ -337,6 +337,50 @@ if(XFSR_BUILD_BENCH)
   target_include_directories(xfsr_load_gl PRIVATE ${GLFW3_INCLUDE_DIRS})
   target_compile_options(xfsr_load_gl PRIVATE ${GLFW3_CFLAGS_OTHER} -Wall -Wextra)
   target_link_libraries(xfsr_load_gl PRIVATE ${GLFW3_LIBRARIES} ${CMAKE_DL_LIBS})
+
+  # Vulkan VRAM Verification Test
+  add_executable(vulkan_vram_test
+    bench/vulkan_vram_test.cpp
+    ${volk_SOURCE_DIR}/volk.c
+  )
+  target_include_directories(vulkan_vram_test PRIVATE
+    ${vulkan_headers_SOURCE_DIR}/include
+    ${volk_SOURCE_DIR}
+  )
+  target_compile_definitions(vulkan_vram_test PRIVATE VK_NO_PROTOTYPES)
+  target_compile_features(vulkan_vram_test PRIVATE cxx_std_20)
+  target_compile_options(vulkan_vram_test PRIVATE -Wall -Wextra)
+  target_link_libraries(vulkan_vram_test PRIVATE ${CMAKE_DL_LIBS})
+endif()
+
+# Hybrid VRAM Manager: Observability Tool
+add_executable(vram_monitor
+  src/vram_monitor/vram_monitor.cpp
+  src/vram_monitor/main.cpp
+)
+target_include_directories(vram_monitor PRIVATE
+  src/vram_monitor
+  /opt/cuda/targets/x86_64-linux/include
+)
+target_compile_features(vram_monitor PRIVATE cxx_std_20)
+target_compile_options(vram_monitor PRIVATE -Wall -Wextra)
+find_library(NVML_LIB nvidia-ml PATHS /usr/lib /usr/lib64 /usr/local/cuda/lib64 /opt/cuda/lib64)
+if(NVML_LIB)
+  target_link_libraries(vram_monitor PRIVATE ${NVML_LIB} ${CMAKE_DL_LIBS})
+else()
+  target_link_libraries(vram_monitor PRIVATE ${CMAKE_DL_LIBS})
+endif()
+
+# AI Memory Virtualization (CUDA)
+find_program(NVCC_EXECUTABLE nvcc PATHS /opt/cuda/bin /usr/local/cuda/bin)
+if(NVCC_EXECUTABLE)
+  add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/ai_vram_test
+    COMMAND ${NVCC_EXECUTABLE} -arch=sm_75 -O3 ${CMAKE_CURRENT_SOURCE_DIR}/src/ai_vram/ai_vram_test.cu -o ${CMAKE_CURRENT_BINARY_DIR}/ai_vram_test
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/ai_vram/ai_vram_test.cu
+    COMMENT "Compiling AI Memory Virtualization test (CUDA)"
+  )
+  add_custom_target(build_ai_vram_test ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/ai_vram_test)
 endif()
 
 if(NOT WIN32)

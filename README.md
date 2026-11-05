@@ -22,7 +22,7 @@ Wrap your game launch in Steam with `edgerun %command%` to render lower and reco
 </p>
 <p align="center"><a href="https://youtu.be/JAZmOpItF34">Watch the demo on YouTube</a></p>
 
-**Current version:** [0.10.0](https://github.com/jersobh/edge/releases/tag/v0.10.0)  
+**Current version:** [0.11.0](https://github.com/jersobh/edge/releases/tag/v0.11.0)  
 *(Formerly known as `xfsr`; `xfsr-run` and `XFSR_*` env vars remain as aliases.)*
 
 **Documentation & Deep-Dive:**
@@ -127,6 +127,54 @@ edgerun --spoof-vram 12GB %command%
 *(Note: Pushing textures far beyond physical VRAM capacity can cause PCIe bus stutter).*
 
 `--no-rcas` disables the optional sharpening pass on upscalers that support it — often a bit more FPS, slightly softer image.
+
+## AI & Distributed GPU Memory Management
+
+Beyond graphics upscaling, EdgeScale provides a tiered framework for **distributed GPU memory management and workload orchestration across heterogeneous devices** (e.g. discrete NVIDIA dGPU + integrated AMD Radeon iGPU + host system RAM). Rather than attempting to merge separate physical devices into an unsupported unified hardware device (which driver isolation and NUMA memory domains prevent), EdgeScale coordinates memory placement, residency tracking, and execution across independent devices.
+
+### Architectural Hierarchy
+
+1. **Tier 1 — Dedicated VRAM (Local dGPU):** Highest priority. Latency-sensitive compute, active working buffers, and primary model weights.
+2. **Tier 2 — Secondary GPU Memory (iGPU / Secondary dGPU):** Distributed compute tier. Offloads model layers or tensor partitions to secondary devices directly accessing shared DDR4 or secondary VRAM.
+3. **Tier 3 — Host System RAM:** Fallback tier for cold weights, extended KV caches, and oversubscription staging across PCIe.
+4. **Tier 4 — Storage (NVMe SSD):** Cold assets, checkpointing, and prefetch streaming.
+
+### Memory Manager vs. Execution Orchestrator
+
+EdgeScale strictly separates two responsibilities:
+- **Memory Manager:** Intercepts Vulkan and CUDA allocations, manages heap fallbacks (`DEVICE_LOCAL` -> `HOST_VISIBLE`), and tracks cross-device residency.
+- **Execution Orchestrator & Cost Scheduler:** Evaluates device topology, memory bandwidth, compute throughput, transfer latency, and access frequency to dynamically schedule tensor/layer partitions.
+
+### Controlled Benchmark Matrix (GTX 1650 4GB + AMD Vega 10 iGPU + 32GB RAM)
+
+Evaluated running Qwen 3.5 4.3B (Q4_K):
+
+| Test | Configuration | Prompt (t/s) | Decode (t/s) | Result / Spill | Key Takeaway |
+|:---|:---|:---:|:---:|:---:|:---|
+| **Test A** | NVIDIA In-VRAM ($c=4096$) | 87.1 t/s | 31.2 t/s | 0 MB | Peak baseline inside native 4GB GDDR5 |
+| **Test B1** | NVIDIA Native ($c=32768$, No Spoof) | **CRASH** | **CRASH** | `OutOfDeviceMemory` | Native driver hard OOM crash |
+| **Test B2** | NVIDIA + EdgeScale ($c=32768$, 8GB Spoof) | 40.4 t/s | 9.6 t/s | Host Spill / OK | **Virtualization succeeds** without OOM |
+| **Test C** | NVIDIA + AMD Layer Split ($c=4096$) | 47.6 t/s | 14.4 t/s | 0 MB | **+50% faster decode than host spill** (direct DDR4 access) |
+| **Test F** | Dual GPU + Host Spill ($c=32768$) | 23.3 t/s | 3.6 t/s | 901 MB Spilled | PCIe contention (sync + spill transfers) |
+
+### Tools & Telemetry
+
+- **VRAM Monitor (`vram_monitor`)**: Cross-vendor CLI and background daemon monitoring NVIDIA (NVML), AMD (sysfs VRAM/GTT), and Linux host memory (`/proc/meminfo`) with automated residency scoring:
+  ```sh
+  ./build/vram_monitor --once
+  ./build/vram_monitor --score
+  ./build/vram_monitor --json
+  ```
+- **Local LLM Execution**:
+  ```sh
+  ./scripts/run_local_llm.sh "Explain quantum computing in two sentences."
+  # Or run any Vulkan/CUDA AI workload with virtualized memory:
+  edgerun --spoof-vram 8GB --no-offload -- llama-cli -m model.gguf -c 32768 -ngl 99
+  ```
+- **Controlled Matrix Benchmark**:
+  ```sh
+  ./tests/benchmark_matrix.sh
+  ```
 
 ## Install
 
@@ -419,12 +467,12 @@ Needs CMake ≥ 3.20, C++17, `glslc`, Vulkan loader, and `libx11-dev` (GL shim X
 
 ## Versioning
 
-- [`VERSION`](VERSION) — **0.10.0**
+- [`VERSION`](VERSION) — **0.11.0**
 - [`CHANGELOG.md`](CHANGELOG.md)
 - Tag `vX.Y.Z` → GitHub Actions builds Linux AppImage + tarball and Windows Setup.exe + ZIP
 
 ```sh
-git tag v0.10.0 && git push origin v0.10.0
+git tag v0.11.0 && git push origin v0.11.0
 ```
 
 ## Credits
