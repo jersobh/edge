@@ -521,6 +521,7 @@ while [[ $# -gt 0 ]]; do
     --no-rcas) RCAS=0; RCAS_CLI=1; shift ;;
     --edge-mode)
       EDGE_MODE="${2:?}"; EDGE_MODE_CLI=1; shift 2
+      if [[ $UPSCALER_CLI -eq 0 ]]; then UPSCALER=edge; UPSCALER_CLI=1; FSR=1; FSR_CLI=1; NATIVE=0; fi
       case "$EDGE_MODE" in
         quality|hq|0) EDGE_MODE=quality ;;
         perf|lite|edge-lite|1) EDGE_MODE=perf ;;
@@ -533,6 +534,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --edge-mode=*)
       EDGE_MODE="${1#*=}"; EDGE_MODE_CLI=1; shift
+      if [[ $UPSCALER_CLI -eq 0 ]]; then UPSCALER=edge; UPSCALER_CLI=1; FSR=1; FSR_CLI=1; NATIVE=0; fi
       case "$EDGE_MODE" in
         quality|hq|0) EDGE_MODE=quality ;;
         perf|lite|edge-lite|1) EDGE_MODE=perf ;;
@@ -544,9 +546,13 @@ while [[ $# -gt 0 ]]; do
       esac
       ;;
     --edge-sharpness|--edge-sharp)
-      EDGE_SHARP="${2:?}"; EDGE_SHARP_CLI=1; shift 2 ;;
+      EDGE_SHARP="${2:?}"; EDGE_SHARP_CLI=1; shift 2
+      if [[ $UPSCALER_CLI -eq 0 ]]; then UPSCALER=edge; UPSCALER_CLI=1; FSR=1; FSR_CLI=1; NATIVE=0; fi
+      ;;
     --edge-sharpness=*|--edge-sharp=*)
-      EDGE_SHARP="${1#*=}"; EDGE_SHARP_CLI=1; shift ;;
+      EDGE_SHARP="${1#*=}"; EDGE_SHARP_CLI=1; shift
+      if [[ $UPSCALER_CLI -eq 0 ]]; then UPSCALER=edge; UPSCALER_CLI=1; FSR=1; FSR_CLI=1; NATIVE=0; fi
+      ;;
     --lod-bias)
       LOD_BIAS="${2:?}"; LOD_BIAS_CLI=1; shift 2 ;;
     --lod-bias=*)
@@ -1155,6 +1161,8 @@ if [[ -z "$UPSCALER" ]]; then
     UPSCALER=native
   elif [[ "$FSR" == "0" ]]; then
     UPSCALER=blit
+  elif [[ "${CMD_NAME:-}" == "edgerun" || "$EDGE_MODE_CLI" -eq 1 || "$EDGE_SHARP_CLI" -eq 1 ]]; then
+    UPSCALER=edge
   else
     UPSCALER=fsr1
   fi
