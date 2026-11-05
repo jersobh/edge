@@ -31,6 +31,10 @@ vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
     return xfsr_GetInstanceProcAddr(instance, pName);
 }
 
+XFSR_EXPORT PFN_vkGetInstanceProcAddr xfsr_get_layer_gipa(void) {
+    return vkGetInstanceProcAddr;
+}
+
 XFSR_EXPORT PFN_vkVoidFunction VKAPI_CALL
 vkGetDeviceProcAddr(VkDevice device, const char* pName) {
     return xfsr_GetDeviceProcAddr(device, pName);

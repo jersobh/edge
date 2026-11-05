@@ -25,6 +25,10 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Steam Overlay / Companion iGPU Probe Crash (`SIGSEGV` in CS2 / Steam titles)**:
+  - Fixed a segmentation fault during companion iGPU initialization in games running with the Steam Overlay and Steam Fossilize layers (`libVkLayer_steam_fossilize.so`).
+  - Corrected `layerGIPA` in `DeviceContext::createLogicalViaLoader`: the layer was previously forwarding `pfnNextGetInstanceProcAddr` into `vkLayerCreateDevice` rather than its own negotiated `vkGetInstanceProcAddr`. This prevented the Vulkan loader from identifying EdgeScale in the layer chain and caused the loader to re-enter upstream layers (`steamoverlayvulkanlayer.so`), invoking an uninitialized function pointer.
+  - Added a POSIX signal trap (`sigsetjmp` / `sigaction`) around companion device discovery to isolate any third-party layer or driver faults, ensuring seamless fallback to same-GPU upscaling instead of terminating the game.
 - **OpenGL / Zink Bidirectional Viewport & Downsampling Remapping**:
   - Fixed quarter-screen / bottom-left postage stamp rendering bug in `gl/xfsr_gl_shim.c` when downsampling or supersampling (DSR 4K / 1440p).
   - Replaced unidirectional `render < window` assumptions across `glViewport`, `glScissor`, `glBlitFramebuffer`, `glfwGetFramebufferSize`, `SDL_GL_GetDrawableSize`, and X11 window queries with bidirectional delta checks (`abs(...) > threshold`).

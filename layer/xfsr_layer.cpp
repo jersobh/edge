@@ -47,13 +47,31 @@
 #include <unordered_set>
 #include <vector>
 
+#if !defined(_WIN32)
+#include <csignal>
+#include <csetjmp>
+#endif
+
 extern "C" {
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL xfsr_GetInstanceProcAddr(VkInstance instance,
                                                                   const char* pName);
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL xfsr_GetDeviceProcAddr(VkDevice device, const char* pName);
+PFN_vkGetInstanceProcAddr xfsr_get_layer_gipa(void);
 }
 
 namespace {
+
+#if !defined(_WIN32)
+thread_local sigjmp_buf g_companionJmpBuf;
+thread_local volatile sig_atomic_t g_inCompanionProbe = 0;
+
+void companionSigTrap(int /*sig*/) {
+    if (g_inCompanionProbe) {
+        g_inCompanionProbe = 0;
+        siglongjmp(g_companionJmpBuf, 1);
+    }
+}
+#endif
 
 // When creating the companion iGPU device via volk, skip our CreateDevice hook
 // (pNext has no loader link info — would return INITIALIZATION_FAILED).
@@ -824,6 +842,102 @@ void destroyProxy(ProxySwapchain* ps) {
     unsetenv("XFSR_GL_REMAP");
 }
 
+static bool probeCompanionCandidates(DeviceData* dd, InstanceData* id, VkSurfaceKHR surface,
+                                      const std::vector<VkPhysicalDevice>& devices, DualDevices& dual) {
+    for (size_t i = 0; i < devices.size(); ++i) {
+        VkPhysicalDevice phys = devices[i];
+        if (phys == dd->physical) {
+            logv("[xfsr] companion skip app device (same physical)\n");
+            continue;
+        }
+        VkPhysicalDeviceProperties props{};
+        id->GetPhysicalDeviceProperties(phys, &props);
+        const bool isIgpu =
+            props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ||
+            (props.vendorID == 0x1002 &&
+             props.deviceType != VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU);
+        if (!isIgpu) {
+            logv("[xfsr] companion skip %s (type=%u)\n", props.deviceName,
+                 static_cast<unsigned>(props.deviceType));
+            continue;
+        }
+        dual.integrated.physical = phys;
+        dual.integrated.props = props;
+        vkGetPhysicalDeviceMemoryProperties(phys, &dual.integrated.memProps);
+        dual.integrated.timestampPeriod = props.limits.timestampPeriod;
+        try {
+            // Pass our layer's GIPA so the loader knows this layer is calling,
+            // and starts device creation at the next layer beneath us (skipping
+            // layers above us like Steam Overlay and Fossilize).
+            dual.integrated.createLogicalViaLoader(
+                id->instance, surface, id->layerCreateDevice,
+                xfsr_get_layer_gipa(),
+                id->layerDestroyDevice);
+        } catch (const std::exception& e) {
+            logv("[xfsr] companion createLogical failed on %s: %s\n", props.deviceName,
+                 e.what());
+            dual.integrated = {};
+            continue;
+        }
+        if (!dual.integrated.canPresent) {
+            logv("[xfsr] companion %s: no present support on this surface — "
+                 "same-GPU blit fallback\n",
+                 props.deviceName);
+            dual.integrated.destroy();
+            dual.integrated = {};
+            continue;
+        }
+        dual.presentDevice = &dual.integrated;
+        return true;
+    }
+    return false;
+}
+
+#if !defined(_WIN32)
+static bool safeProbeCompanion(DeviceData* dd, InstanceData* id, VkSurfaceKHR surface,
+                               const std::vector<VkPhysicalDevice>& devices, DualDevices& dual) {
+    struct SigTrapGuard {
+        struct sigaction oldSegv{};
+        struct sigaction oldBus{};
+        bool active = false;
+        SigTrapGuard() {
+            struct sigaction sa{};
+            sa.sa_handler = companionSigTrap;
+            sigemptyset(&sa.sa_mask);
+            sa.sa_flags = SA_RESETHAND;
+            sigaction(SIGSEGV, &sa, &oldSegv);
+            sigaction(SIGBUS, &sa, &oldBus);
+            g_inCompanionProbe = 1;
+            active = true;
+        }
+        ~SigTrapGuard() {
+            if (active) {
+                g_inCompanionProbe = 0;
+                sigaction(SIGSEGV, &oldSegv, nullptr);
+                sigaction(SIGBUS, &oldBus, nullptr);
+            }
+        }
+    };
+    SigTrapGuard sigGuard;
+    if (sigsetjmp(g_companionJmpBuf, 1) != 0) {
+        g_inCompanionProbe = 0;
+        sigaction(SIGSEGV, &sigGuard.oldSegv, nullptr);
+        sigaction(SIGBUS, &sigGuard.oldBus, nullptr);
+        sigGuard.active = false;
+        std::fprintf(stderr,
+                     "[xfsr] companion iGPU probe trapped fault in external layer/driver — "
+                     "falling back to same-GPU upscaling\n");
+        return false;
+    }
+    try {
+        return probeCompanionCandidates(dd, id, surface, devices, dual);
+    } catch (const std::exception& e) {
+        logv("[xfsr] companion exception: %s\n", e.what());
+        return false;
+    }
+}
+#endif
+
 bool tryInitCompanionIgpu(DeviceData* dd, VkSurfaceKHR surface) {
     if (!dd || !dd->inst) return false;
     if (dd->igpuReady) return true;
@@ -864,54 +978,18 @@ bool tryInitCompanionIgpu(DeviceData* dd, VkSurfaceKHR surface) {
     DualDevices dual{};
     // Bypass our CreateDevice hook if the loader still routes through the layer GIPA.
     g_bypassCreateDevice = true;
+
+#if !defined(_WIN32)
+    bool ok = safeProbeCompanion(dd, id, surface, devices, dual);
+#else
     bool ok = false;
     try {
-        for (auto phys : devices) {
-            if (phys == dd->physical) {
-                logv("[xfsr] companion skip app device (same physical)\n");
-                continue;
-            }
-            VkPhysicalDeviceProperties props{};
-            id->GetPhysicalDeviceProperties(phys, &props);
-            const bool isIgpu =
-                props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ||
-                (props.vendorID == 0x1002 &&
-                 props.deviceType != VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU);
-            if (!isIgpu) {
-                logv("[xfsr] companion skip %s (type=%u)\n", props.deviceName,
-                     static_cast<unsigned>(props.deviceType));
-                continue;
-            }
-            dual.integrated.physical = phys;
-            dual.integrated.props = props;
-            vkGetPhysicalDeviceMemoryProperties(phys, &dual.integrated.memProps);
-            dual.integrated.timestampPeriod = props.limits.timestampPeriod;
-            try {
-                // Pass next-layer GIPA so the companion device chain skips this layer.
-                dual.integrated.createLogicalViaLoader(id->instance, surface, id->layerCreateDevice,
-                                                       id->gipa, id->layerDestroyDevice);
-            } catch (const std::exception& e) {
-                logv("[xfsr] companion createLogical failed on %s: %s\n", props.deviceName,
-                     e.what());
-                dual.integrated = {};
-                continue;
-            }
-            if (!dual.integrated.canPresent) {
-                logv("[xfsr] companion %s: no present support on this surface — "
-                     "same-GPU blit fallback\n",
-                     props.deviceName);
-                dual.integrated.destroy();
-                dual.integrated = {};
-                continue;
-            }
-            dual.presentDevice = &dual.integrated;
-            ok = true;
-            break;
-        }
+        ok = probeCompanionCandidates(dd, id, surface, devices, dual);
     } catch (const std::exception& e) {
         logv("[xfsr] companion exception: %s\n", e.what());
         ok = false;
     }
+#endif
     g_bypassCreateDevice = false;
     if (!ok || !dual.integrated.device) {
         dd->igpuFailed = true;
