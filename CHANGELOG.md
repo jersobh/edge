@@ -480,7 +480,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - Dual-GPU `SURFACE_LOST` / early `OUT_OF_DATE` (opaque app handle + iGPU-only window WSI)
 - Caps-shrink vs Zink EGL drawable mismatch
 
-[Unreleased]: https://github.com/jersobh/edge/compare/v0.11.1...HEAD
+[Unreleased]: https://github.com/jersobh/edge/compare/v0.11.2...HEAD
+[0.11.2]: https://github.com/jersobh/edge/compare/v0.11.1...v0.11.2
 [0.11.1]: https://github.com/jersobh/edge/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/jersobh/edge/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/jersobh/edge/compare/v0.9.0...v0.10.0
