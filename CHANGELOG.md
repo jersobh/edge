@@ -8,7 +8,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.11.1] — 2026-11-05
+## [0.11.2] — 2026-11-05
 
 ### Added
 
@@ -16,6 +16,19 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   - Added intelligent AI compute detection in `edgerun` when executing `llama-cli` or `llama-server`.
   - Automatically identifies heterogeneous Vulkan devices (`dGPU` primary compute + `iGPU` secondary compute), unmasks device selection, disables unnecessary graphics swapchain hooks (`XFSR_OFFLOAD=0`), and auto-injects optimal pipeline layer splits (`--device <dGPU>,<iGPU> --split-mode layer --tensor-split 2,1`).
   - Achieves **14.0 t/s prompt and 5.4 t/s decode** with zero manual multi-GPU split parameters.
+
+### Fixed
+
+- **EdgePass Default & Option Promotion**:
+  - Fixed single-GPU mode (`--no-offload`) defaulting to legacy `fsr1` instead of `edge`.
+  - Passing `--edge-mode` or `--edge-sharpness` now automatically selects `UPSCALER=edge`.
+- **Integrated GPU HUD Telemetry Tagging**:
+  - Fixed HUD overlay incorrectly labeling single APU/iGPU devices (such as AMD Renoir/Vega) as `dGPU`. Non-discrete single devices are now accurately tagged as `iGPU`.
+
+## [0.11.1] — 2026-11-05
+
+### Added
+
 - **Dual-GPU In-Game Telemetry & Dynamic NVML Discovery (`--overlay`)**:
   - Integrated dynamic runtime loading of `libnvidia-ml.so.1` (NVML) via `dlopen` to sample NVIDIA dGPU utilization percentage, temperature (°C), and VRAM usage (MB) without introducing build-time dependencies.
   - Enhanced HUD overlay to distinguish and explicitly label multi-GPU topologies as `dGPU` and `iGPU` (e.g. `dGPU [GTX 1650]` and `iGPU [Vega 10 Graphics]`) alongside execution mode (`HYBRID`, `OFFLOAD`, `SAME-GPU`, `DSR 4K`), active upscaler, FPS, and CPU usage.
