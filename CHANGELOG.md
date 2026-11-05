@@ -27,6 +27,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   - Reproducible benchmark comparing native VRAM baseline ($c=4096$), native driver failure ($c=32768$, `VK_ERROR_OUT_OF_DEVICE_MEMORY`), EdgeScale virtualized budget ($c=32768$, 40.4 t/s prefill / 9.6 t/s decode), dual-GPU layer split (14.4 t/s decode), and dual-GPU oversubscription (3.6 t/s decode with 901 MB spilled).
 - **Automated Local LLM Launcher (`scripts/run_local_llm.sh`)**:
   - Wrapper for running large local models (e.g. Qwen 3.5 4.3B GGUF) with large context windows under EdgeScale VRAM virtualization.
+- **Graphics Benchmark Suite Expanded (`scripts/xfsr-bench.sh`)**:
+  - Updated the WSI/FPS benchmark suite across both Vulkan and OpenGL (Zink) to test modern execution modes (`--offload` one-way, `--offload --no-one-way` round-trip, `--hybrid`, `--native`, `--dsr 4k`, `--spoof-vram 8GB`), all upscalers (`edge` [quality/perf/nearest], `nis`, `fsr1`, `blit`, `nearest`), and new modular test filters (`XFSR_BENCH_MODES_ONLY`, `XFSR_BENCH_UPSCALERS_ONLY`, `XFSR_BENCH_PRESETS_ONLY`).
 
 ### Fixed
 

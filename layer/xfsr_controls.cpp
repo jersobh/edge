@@ -185,6 +185,10 @@ struct Runtime {
     uint32_t lastRenderW = 0;
     uint32_t lastRenderH = 0;
     char presentMode[32] = "—"; // identity | proxy-edge | hybrid-edge | …
+    char dgpuName[64] = "";
+    char igpuName[64] = "";
+    bool hasDgpu = false;
+    bool hasIgpu = false;
     std::chrono::steady_clock::time_point lastPresent{};
     std::chrono::steady_clock::time_point lastScaleChange{};
     std::chrono::steady_clock::time_point toastUntil{};
@@ -291,16 +295,103 @@ int presetIndexFromScale(float s) {
     return best;
 }
 
+struct GpuMetric {
+    char tag[16] = "";     // "dGPU" or "iGPU"
+    char name[48] = "";    // "GeForce GTX 1650" or "Radeon Vega 10"
+    int loadPct = -1;
+    int tempC = -1;
+    int vramUsedMb = -1;
+    bool isNvidia = false;
+    char busyPath[320] = "";
+    char tempPath[660] = "";
+    char vramPath[320] = "";
+};
+
 struct HudMetrics {
     double fps = 0;
     int cpu = -1;
-    int gpuPct[2] = {-1, -1};
-    int gpuC[2] = {-1, -1};
-    char gpuTag[2][8] = {{0}, {0}};
-    char busyPath[2][320] = {{0}, {0}};
-    char tempPath[2][660] = {{0}, {0}};
+    GpuMetric gpus[2];
     int gpuN = 0;
 };
+
+#if !defined(_WIN32)
+struct NvmlContext {
+    void* lib = nullptr;
+    using Init_fn = int (*)();
+    using Shutdown_fn = int (*)();
+    using GetHandle_fn = int (*)(unsigned int, void**);
+    using GetName_fn = int (*)(void*, char*, unsigned int);
+    using GetTemp_fn = int (*)(void*, int, unsigned int*);
+    struct Rates { unsigned int gpu; unsigned int memory; };
+    using GetRates_fn = int (*)(void*, Rates*);
+    struct Mem { unsigned long long total; unsigned long long free; unsigned long long used; };
+    using GetMem_fn = int (*)(void*, Mem*);
+
+    Init_fn init = nullptr;
+    Shutdown_fn shutdown = nullptr;
+    GetHandle_fn getHandle = nullptr;
+    GetName_fn getName = nullptr;
+    GetTemp_fn getTemp = nullptr;
+    GetRates_fn getRates = nullptr;
+    GetMem_fn getMem = nullptr;
+
+    void* dev = nullptr;
+    char name[64] = "";
+    bool ready = false;
+    bool attempted = false;
+
+    void probe() {
+        if (attempted) return;
+        attempted = true;
+        lib = dlopen("libnvidia-ml.so.1", RTLD_NOW);
+        if (!lib) lib = dlopen("libnvidia-ml.so", RTLD_NOW);
+        if (!lib) return;
+        init = (Init_fn)dlsym(lib, "nvmlInit_v2");
+        if (!init) init = (Init_fn)dlsym(lib, "nvmlInit");
+        shutdown = (Shutdown_fn)dlsym(lib, "nvmlShutdown");
+        getHandle = (GetHandle_fn)dlsym(lib, "nvmlDeviceGetHandleByIndex_v2");
+        if (!getHandle) getHandle = (GetHandle_fn)dlsym(lib, "nvmlDeviceGetHandleByIndex");
+        getName = (GetName_fn)dlsym(lib, "nvmlDeviceGetName");
+        getTemp = (GetTemp_fn)dlsym(lib, "nvmlDeviceGetTemperature");
+        getRates = (GetRates_fn)dlsym(lib, "nvmlDeviceGetUtilizationRates");
+        getMem = (GetMem_fn)dlsym(lib, "nvmlDeviceGetMemoryInfo");
+
+        if (init && init() == 0 && getHandle && getHandle(0, &dev) == 0 && dev) {
+            ready = true;
+            char fullName[64] = {0};
+            if (getName && getName(dev, fullName, sizeof(fullName)) == 0) {
+                const char* src = fullName;
+                if (std::strncmp(src, "NVIDIA GeForce ", 15) == 0) src += 15;
+                else if (std::strncmp(src, "NVIDIA ", 7) == 0) src += 7;
+                std::snprintf(name, sizeof(name), "%s", src);
+            } else {
+                std::snprintf(name, sizeof(name), "GTX/RTX GPU");
+            }
+        }
+    }
+
+    bool sample(int& outLoad, int& outTemp, int& outUsedMb) {
+        if (!ready || !dev) return false;
+        if (getRates) {
+            Rates r{};
+            if (getRates(dev, &r) == 0) outLoad = static_cast<int>(r.gpu);
+        }
+        if (getTemp) {
+            unsigned int t = 0;
+            if (getTemp(dev, 0, &t) == 0) outTemp = static_cast<int>(t);
+        }
+        if (getMem) {
+            Mem m{};
+            if (getMem(dev, &m) == 0) {
+                outUsedMb = static_cast<int>(m.used / (1024ULL * 1024ULL));
+            }
+        }
+        return true;
+    }
+};
+
+static NvmlContext g_nvml;
+#endif
 
 HudMetrics g_metrics;
 uint64_t g_presentMark = 0;
@@ -316,54 +407,96 @@ int readSysInt(const char* path) {
     return v;
 }
 
+unsigned long long readSysUll(const char* path) {
+    FILE* f = std::fopen(path, "r");
+    if (!f) return 0;
+    unsigned long long v = 0;
+    if (std::fscanf(f, "%llu", &v) != 1) v = 0;
+    std::fclose(f);
+    return v;
+}
+
 void discoverGpus() {
 #if !defined(_WIN32)
     if (g_metrics.gpuN > 0) return;
-    DIR* dir = opendir("/sys/class/drm");
-    if (!dir) return;
-    while (g_metrics.gpuN < 2) {
-        dirent* ent = readdir(dir);
-        if (!ent) break;
-        const char* name = ent->d_name;
-        if (std::strncmp(name, "card", 4) != 0) continue;
-        if (std::strchr(name, '-')) continue;
-        char vendorPath[320];
-        std::snprintf(vendorPath, sizeof(vendorPath), "/sys/class/drm/%s/device/vendor", name);
-        FILE* vf = std::fopen(vendorPath, "r");
-        unsigned vendor = 0;
-        if (!vf) continue;
-        if (std::fscanf(vf, "%x", &vendor) != 1) vendor = 0;
-        std::fclose(vf);
-        const int i = g_metrics.gpuN;
-        if (vendor == 0x10deu)
-            std::snprintf(g_metrics.gpuTag[i], sizeof(g_metrics.gpuTag[i]), "NV");
-        else if (vendor == 0x1002u)
-            std::snprintf(g_metrics.gpuTag[i], sizeof(g_metrics.gpuTag[i]), "AMD");
-        else
-            std::snprintf(g_metrics.gpuTag[i], sizeof(g_metrics.gpuTag[i]), "GPU");
-        std::snprintf(g_metrics.busyPath[i], sizeof(g_metrics.busyPath[i]),
-                      "/sys/class/drm/%s/device/gpu_busy_percent", name);
-        g_metrics.gpuPct[i] = readSysInt(g_metrics.busyPath[i]);
-        char hwmon[384];
-        std::snprintf(hwmon, sizeof(hwmon), "/sys/class/drm/%s/device/hwmon", name);
-        DIR* hd = opendir(hwmon);
-        if (hd) {
-            while (dirent* he = readdir(hd)) {
-                if (he->d_name[0] == '.') continue;
-                char tp[660];
-                std::snprintf(tp, sizeof(tp), "%s/%s/temp1_input", hwmon, he->d_name);
-                const int milli = readSysInt(tp);
-                if (milli > 0) {
-                    std::snprintf(g_metrics.tempPath[i], sizeof(g_metrics.tempPath[i]), "%s", tp);
-                    g_metrics.gpuC[i] = milli / 1000;
-                    break;
-                }
-            }
-            closedir(hd);
-        }
-        ++g_metrics.gpuN;
+
+    // 1. Probe NVIDIA dGPU via NVML
+    g_nvml.probe();
+    if (g_nvml.ready && g_metrics.gpuN < 2) {
+        GpuMetric& g = g_metrics.gpus[g_metrics.gpuN++];
+        std::snprintf(g.tag, sizeof(g.tag), "dGPU");
+        std::snprintf(g.name, sizeof(g.name), "%s", g_nvml.name);
+        g.isNvidia = true;
     }
-    closedir(dir);
+
+    // 2. Discover DRM cards from sysfs
+    DIR* dir = opendir("/sys/class/drm");
+    if (dir) {
+        while (g_metrics.gpuN < 2) {
+            dirent* ent = readdir(dir);
+            if (!ent) break;
+            const char* name = ent->d_name;
+            if (std::strncmp(name, "card", 4) != 0) continue;
+            if (std::strchr(name, '-')) continue;
+
+            char vendorPath[320];
+            std::snprintf(vendorPath, sizeof(vendorPath), "/sys/class/drm/%s/device/vendor", name);
+            FILE* vf = std::fopen(vendorPath, "r");
+            unsigned vendor = 0;
+            if (!vf) continue;
+            if (std::fscanf(vf, "%x", &vendor) != 1) vendor = 0;
+            std::fclose(vf);
+
+            // Skip NVIDIA DRM if already handled via NVML
+            if (vendor == 0x10deu && g_nvml.ready) continue;
+
+            GpuMetric& g = g_metrics.gpus[g_metrics.gpuN];
+            g.isNvidia = (vendor == 0x10deu);
+
+            if (vendor == 0x1002u) {
+                if (g_metrics.gpuN > 0) {
+                    std::snprintf(g.tag, sizeof(g.tag), "iGPU");
+                    std::snprintf(g.name, sizeof(g.name), "AMD Vega/Radeon");
+                } else {
+                    std::snprintf(g.tag, sizeof(g.tag), "dGPU");
+                    std::snprintf(g.name, sizeof(g.name), "AMD Radeon");
+                }
+            } else if (vendor == 0x8086u) {
+                std::snprintf(g.tag, sizeof(g.tag), "iGPU");
+                std::snprintf(g.name, sizeof(g.name), "Intel HD/Iris");
+            } else if (vendor == 0x10deu) {
+                std::snprintf(g.tag, sizeof(g.tag), "dGPU");
+                std::snprintf(g.name, sizeof(g.name), "GeForce GPU");
+            } else {
+                std::snprintf(g.tag, sizeof(g.tag), "GPU");
+                std::snprintf(g.name, sizeof(g.name), "Generic GPU");
+            }
+
+            std::snprintf(g.busyPath, sizeof(g.busyPath),
+                          "/sys/class/drm/%s/device/gpu_busy_percent", name);
+            std::snprintf(g.vramPath, sizeof(g.vramPath),
+                          "/sys/class/drm/%s/device/mem_info_vram_used", name);
+
+            char hwmon[384];
+            std::snprintf(hwmon, sizeof(hwmon), "/sys/class/drm/%s/device/hwmon", name);
+            DIR* hd = opendir(hwmon);
+            if (hd) {
+                while (dirent* he = readdir(hd)) {
+                    if (he->d_name[0] == '.') continue;
+                    char tp[660];
+                    std::snprintf(tp, sizeof(tp), "%s/%s/temp1_input", hwmon, he->d_name);
+                    const int milli = readSysInt(tp);
+                    if (milli > 0) {
+                        std::snprintf(g.tempPath, sizeof(g.tempPath), "%s", tp);
+                        break;
+                    }
+                }
+                closedir(hd);
+            }
+            ++g_metrics.gpuN;
+        }
+        closedir(dir);
+    }
 #endif
 }
 
@@ -412,64 +545,123 @@ void sampleMetricsLocked() {
     g_presentMark = frames;
     g_metricAt = now;
     g_metrics.cpu = sampleCpuPercent();
+
+#if !defined(_WIN32)
     for (int i = 0; i < g_metrics.gpuN; ++i) {
-        if (g_metrics.busyPath[i][0]) {
-            const int pct = readSysInt(g_metrics.busyPath[i]);
-            if (pct >= 0) g_metrics.gpuPct[i] = pct;
-        }
-        if (g_metrics.tempPath[i][0]) {
-            const int milli = readSysInt(g_metrics.tempPath[i]);
-            if (milli > 0) g_metrics.gpuC[i] = milli / 1000;
+        auto& g = g_metrics.gpus[i];
+        if (g.isNvidia) {
+            g_nvml.sample(g.loadPct, g.tempC, g.vramUsedMb);
+        } else {
+            if (g.busyPath[0]) {
+                const int pct = readSysInt(g.busyPath);
+                if (pct >= 0) g.loadPct = pct;
+            }
+            if (g.tempPath[0]) {
+                const int milli = readSysInt(g.tempPath);
+                if (milli > 0) g.tempC = milli / 1000;
+            }
+            if (g.vramPath[0]) {
+                const unsigned long long v = readSysUll(g.vramPath);
+                if (v > 0) g.vramUsedMb = static_cast<int>(v / (1024ULL * 1024ULL));
+            }
         }
     }
-}
-
-void appendGpu(char* out, size_t n, int i) {
-    char piece[64];
-    if (g_metrics.gpuPct[i] >= 0 && g_metrics.gpuC[i] >= 0)
-        std::snprintf(piece, sizeof(piece), " %s %d%% %dC", g_metrics.gpuTag[i],
-                      g_metrics.gpuPct[i], g_metrics.gpuC[i]);
-    else if (g_metrics.gpuPct[i] >= 0)
-        std::snprintf(piece, sizeof(piece), " %s %d%%", g_metrics.gpuTag[i], g_metrics.gpuPct[i]);
-    else if (g_metrics.gpuC[i] >= 0)
-        std::snprintf(piece, sizeof(piece), " %s %dC", g_metrics.gpuTag[i], g_metrics.gpuC[i]);
-    else
-        return;
-    std::strncat(out, piece, n - std::strlen(out) - 1);
+#endif
 }
 
 void formatStatusLocked(char* out, size_t n) {
     sampleMetricsLocked();
     char cpu[16] = "--";
     if (g_metrics.cpu >= 0) std::snprintf(cpu, sizeof(cpu), "%d%%", g_metrics.cpu);
-    if (g_rt.upscaler == Upscaler::Edge) {
-        const char* edgeModeStr =
-            (g_rt.edgeMode == 2) ? "nearest" : (g_rt.edgePerf ? "perf" : "hq");
-        if (g_rt.adaptive) {
-            std::snprintf(out, n,
-                          "xfsr A %.2fx tgt:%.0f edge %s sharp:%.2f\nFPS %.0f  CPU %s", g_rt.scale,
-                          g_rt.targetFps, edgeModeStr, g_rt.edgeSharpness,
-                          g_metrics.fps, cpu);
+
+    // --- Line 1: Mode, Upscaler, and Resolutions ---
+    const char* modeLabel = "SAME-GPU";
+    if (g_rt.offload) {
+        if (g_rt.oneWay) {
+            modeLabel = (g_rt.upscaler == Upscaler::Edge) ? "HYBRID (dGPU->iGPU)" : "OFFLOAD (1-way)";
         } else {
-            std::snprintf(out, n,
-                          "xfsr %s %.2fx edge %s sharp:%.2f off:%s 1way:%s\nFPS %.0f  CPU %s",
-                          presetLabel(g_rt.scale, g_rt.presetIdx), g_rt.scale,
-                          edgeModeStr, g_rt.edgeSharpness,
-                          g_rt.offload ? "on" : "off", g_rt.oneWay ? "on" : "off", g_metrics.fps,
-                          cpu);
+            modeLabel = "OFFLOAD (round-trip)";
         }
-    } else if (g_rt.adaptive) {
-        std::snprintf(out, n,
-                      "xfsr A %.2fx tgt:%.0f %s RCAS:%s\nFPS %.0f  CPU %s", g_rt.scale,
-                      g_rt.targetFps, upscalerName(g_rt.upscaler), g_rt.rcas ? "on" : "off",
-                      g_metrics.fps, cpu);
-    } else {
-        std::snprintf(out, n, "xfsr %s %.2fx %s RCAS:%s off:%s 1way:%s\nFPS %.0f  CPU %s",
-                      presetLabel(g_rt.scale, g_rt.presetIdx), g_rt.scale, upscalerName(g_rt.upscaler),
-                      g_rt.rcas ? "on" : "off", g_rt.offload ? "on" : "off",
-                      g_rt.oneWay ? "on" : "off", g_metrics.fps, cpu);
+    } else if (g_rt.lastRenderW == 3840 && g_rt.lastDisplayW == 1920) {
+        modeLabel = "DSR 4K (SSAA)";
+    } else if (g_rt.lastRenderW && g_rt.lastDisplayW && g_rt.lastRenderW == g_rt.lastDisplayW) {
+        modeLabel = "PASSTHROUGH";
     }
-    for (int i = 0; i < g_metrics.gpuN; ++i) appendGpu(out, n, i);
+
+    char upscalerBuf[64] = "";
+    if (g_rt.upscaler == Upscaler::Edge) {
+        const char* em = (g_rt.edgeMode == 2) ? "nearest" : (g_rt.edgePerf ? "perf" : "quality");
+        std::snprintf(upscalerBuf, sizeof(upscalerBuf), "edge (%s, CAS:%.2f)", em, g_rt.edgeSharpness);
+    } else if (g_rt.upscaler == Upscaler::Nis) {
+        std::snprintf(upscalerBuf, sizeof(upscalerBuf), "NIS");
+    } else if (g_rt.upscaler == Upscaler::Fsr1) {
+        std::snprintf(upscalerBuf, sizeof(upscalerBuf), "FSR1 (RCAS:%s)", g_rt.rcas ? "on" : "off");
+    } else if (g_rt.upscaler == Upscaler::Nearest) {
+        std::snprintf(upscalerBuf, sizeof(upscalerBuf), "nearest");
+    } else {
+        std::snprintf(upscalerBuf, sizeof(upscalerBuf), "blit");
+    }
+
+    char resBuf[64] = "";
+    if (g_rt.lastRenderW && g_rt.lastDisplayW) {
+        std::snprintf(resBuf, sizeof(resBuf), "%ux%u -> %ux%u (%.2fx)",
+                      g_rt.lastRenderW, g_rt.lastRenderH,
+                      g_rt.lastDisplayW, g_rt.lastDisplayH, g_rt.scale);
+    } else {
+        std::snprintf(resBuf, sizeof(resBuf), "%.2fx %s", g_rt.scale, presetLabel(g_rt.scale, g_rt.presetIdx));
+    }
+
+    // --- Line 2: FPS and CPU ---
+    char fpsBuf[64] = "";
+    if (g_rt.adaptive) {
+        std::snprintf(fpsBuf, sizeof(fpsBuf), "FPS %.0f (tgt:%.0f)   CPU %s", g_metrics.fps, g_rt.targetFps, cpu);
+    } else {
+        std::snprintf(fpsBuf, sizeof(fpsBuf), "FPS %.0f   CPU %s", g_metrics.fps, cpu);
+    }
+
+    // --- Line 3: Both GPUs (dGPU and iGPU with names, load, temp, VRAM) ---
+    char gpuBuf[256] = "";
+    for (int i = 0; i < g_metrics.gpuN; ++i) {
+        auto& g = g_metrics.gpus[i];
+        const char* name = g.name;
+        if (std::strcmp(g.tag, "dGPU") == 0) {
+            const char* s = g_rt.dgpuName[0] ? g_rt.dgpuName : g.name;
+            if (std::strncmp(s, "NVIDIA GeForce ", 15) == 0) s += 15;
+            else if (std::strncmp(s, "NVIDIA ", 7) == 0) s += 7;
+            name = s;
+        } else if (std::strcmp(g.tag, "iGPU") == 0) {
+            const char* s = g_rt.igpuName[0] ? g_rt.igpuName : g.name;
+            if (std::strncmp(s, "AMD Radeon ", 11) == 0) s += 11;
+            else if (std::strncmp(s, "AMD ", 4) == 0) s += 4;
+            name = s;
+        }
+
+        char piece[128] = "";
+        char metricsPart[64] = "";
+        if (g.loadPct >= 0 && g.tempC >= 0 && g.vramUsedMb >= 0) {
+            std::snprintf(metricsPart, sizeof(metricsPart), ": %d%% %dC %dMB", g.loadPct, g.tempC, g.vramUsedMb);
+        } else if (g.loadPct >= 0 && g.tempC >= 0) {
+            std::snprintf(metricsPart, sizeof(metricsPart), ": %d%% %dC", g.loadPct, g.tempC);
+        } else if (g.loadPct >= 0 && g.vramUsedMb >= 0) {
+            std::snprintf(metricsPart, sizeof(metricsPart), ": %d%% %dMB", g.loadPct, g.vramUsedMb);
+        } else if (g.loadPct >= 0) {
+            std::snprintf(metricsPart, sizeof(metricsPart), ": %d%%", g.loadPct);
+        } else if (g.tempC >= 0) {
+            std::snprintf(metricsPart, sizeof(metricsPart), ": %dC", g.tempC);
+        }
+
+        if (i > 0) std::strncat(gpuBuf, " | ", sizeof(gpuBuf) - std::strlen(gpuBuf) - 1);
+        std::snprintf(piece, sizeof(piece), "%s [%s]%s", g.tag, name, metricsPart);
+        std::strncat(gpuBuf, piece, sizeof(gpuBuf) - std::strlen(gpuBuf) - 1);
+    }
+
+    if (gpuBuf[0]) {
+        std::snprintf(out, n, "EdgeScale [%s] %s | %s\n%s\n%s",
+                      modeLabel, upscalerBuf, resBuf, fpsBuf, gpuBuf);
+    } else {
+        std::snprintf(out, n, "EdgeScale [%s] %s | %s\n%s",
+                      modeLabel, upscalerBuf, resBuf, fpsBuf);
+    }
 }
 
 void armToastLocked(const char* msg) {
@@ -1199,9 +1391,26 @@ void ensureOverlayGpu(OverlayGpu* ov, DeviceContext* ctx, uint32_t w, uint32_t h
 void rasterizeText(uint8_t* pixels, uint32_t width, uint32_t height, const char* text) {
     const size_t n = static_cast<size_t>(width) * height * 4u;
     std::memset(pixels, 0, n);
-    const int panelH = static_cast<int>(height);
-    for (int y = 0; y < panelH; ++y) {
-        for (uint32_t x = 0; x < width; ++x) {
+
+    uint32_t maxLineChars = 0;
+    uint32_t lineChars = 0;
+    uint32_t lineCount = 1;
+    for (const char* p = text; *p; ++p) {
+        if (*p == '\n') {
+            if (lineChars > maxLineChars) maxLineChars = lineChars;
+            lineChars = 0;
+            lineCount++;
+        } else {
+            lineChars++;
+        }
+    }
+    if (lineChars > maxLineChars) maxLineChars = lineChars;
+
+    const uint32_t boxW = std::min(width, maxLineChars * 18u + 24u);
+    const uint32_t boxH = std::min(height, lineCount * 22u + 16u);
+
+    for (uint32_t y = 0; y < boxH; ++y) {
+        for (uint32_t x = 0; x < boxW; ++x) {
             uint8_t* p = pixels + (static_cast<size_t>(y) * width + x) * 4;
             p[0] = 10;
             p[1] = 12;
@@ -1209,14 +1418,14 @@ void rasterizeText(uint8_t* pixels, uint32_t width, uint32_t height, const char*
             p[3] = 210;
         }
     }
-    int x = 8;
+    int x = 12;
     int y = 10;
     const int scale = 2;
     for (const char* t = text; *t; ++t) {
         char c = *t;
         if (c == '\n') {
-            x = 8;
-            y += 8 * scale + 4;
+            x = 12;
+            y += 8 * scale + 6;
             continue;
         }
         const unsigned char uc = static_cast<unsigned char>(c);
@@ -1245,8 +1454,8 @@ void rasterizeText(uint8_t* pixels, uint32_t width, uint32_t height, const char*
         }
         x += 8 * scale + 2;
         if (x + 8 * scale >= static_cast<int>(width)) {
-            x = 8;
-            y += 8 * scale + 4;
+            x = 12;
+            y += 8 * scale + 6;
         }
     }
 }
@@ -1307,6 +1516,20 @@ void publishPresentStatus(const char* mode, uint32_t renderW, uint32_t renderH,
                  g_rt.scale, presetLabel(g_rt.scale, g_rt.presetIdx), upscalerName(g_rt.upscaler),
                  g_rt.adaptive ? 1 : 0, g_rt.targetFps, g_rt.haveEma ? g_rt.emaFtMs : 0.f);
     std::fclose(f);
+}
+
+void setDeviceInfo(const char* dgpuName, const char* igpuName, bool dgpuIsDiscrete, bool hasIgpu) {
+    (void)dgpuIsDiscrete;
+    initFromEnv();
+    std::lock_guard<std::mutex> lock(g_rt.mu);
+    if (dgpuName && dgpuName[0]) {
+        std::snprintf(g_rt.dgpuName, sizeof(g_rt.dgpuName), "%s", dgpuName);
+        g_rt.hasDgpu = true;
+    }
+    if (igpuName && igpuName[0]) {
+        std::snprintf(g_rt.igpuName, sizeof(g_rt.igpuName), "%s", igpuName);
+        g_rt.hasIgpu = hasIgpu;
+    }
 }
 
 void initFromEnv() {
@@ -1652,7 +1875,7 @@ bool recordOverlay(OverlayGpu* ov, DeviceContext* ctx, VkCommandBuffer cmd, VkIm
     if (swapW < 64 || swapH < 32) return false;
 
     constexpr uint32_t kOw = 1600;
-    constexpr uint32_t kOh = 72;
+    constexpr uint32_t kOh = 84;
     ensureOverlayGpu(ov, ctx, kOw, kOh);
     if (!ov->stagingMapped || !ov->image.image) return false;
 
@@ -1682,17 +1905,34 @@ bool recordOverlay(OverlayGpu* ov, DeviceContext* ctx, VkCommandBuffer cmd, VkIm
                    VK_ACCESS_TRANSFER_READ_BIT);
     }
 
+    uint32_t maxLineChars = 0;
+    uint32_t lineChars = 0;
+    uint32_t lineCount = 1;
+    for (const char* p = text; *p; ++p) {
+        if (*p == '\n') {
+            if (lineChars > maxLineChars) maxLineChars = lineChars;
+            lineChars = 0;
+            lineCount++;
+        } else {
+            lineChars++;
+        }
+    }
+    if (lineChars > maxLineChars) maxLineChars = lineChars;
+
+    const uint32_t contentW = std::min(ov->width, maxLineChars * 18u + 24u);
+    const uint32_t contentH = std::min(ov->height, lineCount * 22u + 16u);
+
     // Bottom-left — top is usually MangoHud.
     const int32_t margin = 12;
     const int32_t dw =
-        static_cast<int32_t>(std::min(ov->width, swapW > 24u ? swapW - 24u : ov->width));
+        static_cast<int32_t>(std::min(contentW, swapW > 24u ? swapW - 24u : contentW));
     const int32_t dh =
-        static_cast<int32_t>(std::min(ov->height, swapH > 24u ? swapH - 24u : ov->height));
+        static_cast<int32_t>(std::min(contentH, swapH > 24u ? swapH - 24u : contentH));
     const int32_t dstY0 = std::max(0, static_cast<int32_t>(swapH) - dh - margin);
     VkImageBlit blit{};
     blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     blit.srcOffsets[0] = {0, 0, 0};
-    blit.srcOffsets[1] = {static_cast<int32_t>(ov->width), static_cast<int32_t>(ov->height), 1};
+    blit.srcOffsets[1] = {dw, dh, 1};
     blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     blit.dstOffsets[0] = {margin, dstY0, 0};
     blit.dstOffsets[1] = {margin + dw, dstY0 + dh, 1};

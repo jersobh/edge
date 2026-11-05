@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Benchmark xfsr-run across WSI (X11/Wayland), window modes, APIs, and presets.
-# Every case runs with MangoHud (overlay + frametime) for visual/FPS parity.
+# Benchmark xfsr-run across WSI (X11/Wayland), window modes, APIs, presets, execution modes, and upscalers.
+# Every case runs with the built-in HUD overlay enabled when available.
 #
 # Usage:
 #   ./scripts/xfsr-bench.sh                 # full matrix (x11+wl × win+fs)
@@ -10,7 +10,11 @@
 #   XFSR_BENCH_WAYLAND_ONLY=1 ./scripts/xfsr-bench.sh
 #   XFSR_BENCH_VK_ONLY=1 / XFSR_BENCH_GL_ONLY=1
 #   XFSR_BENCH_WINDOWED_ONLY=1 / XFSR_BENCH_FULLSCREEN_ONLY=1
-#   XFSR_BENCH_NO_MANGOHUD=1
+#   XFSR_BENCH_MODES_ONLY=1 ./scripts/xfsr-bench.sh     # execution modes (offload, hybrid, DSR, VRAM spoof)
+#   XFSR_BENCH_UPSCALERS_ONLY=1 ./scripts/xfsr-bench.sh # upscalers (edge, nis, blit, nearest, fsr1)
+#   XFSR_BENCH_PRESETS_ONLY=1 ./scripts/xfsr-bench.sh   # presets (quality, balanced, perf, ultra)
+#   XFSR_BENCH_NO_OVERLAY=1 ./scripts/xfsr-bench.sh    # disable built-in HUD overlay
+#   XFSR_BENCH_MANGOHUD=1 ./scripts/xfsr-bench.sh      # optionally use MangoHud instead
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -24,8 +28,11 @@ WIN_H="${XFSR_BENCH_H:-1080}"
 VK_BIN="$BUILD/xfsr_load_vk"
 GL_BIN="$BUILD/xfsr_load_gl"
 
-USE_MANGOHUD=1
-[[ "${XFSR_BENCH_NO_MANGOHUD:-0}" == "1" ]] && USE_MANGOHUD=0
+USE_MANGOHUD=0
+[[ "${XFSR_BENCH_MANGOHUD:-0}" == "1" ]] && USE_MANGOHUD=1
+
+USE_OVERLAY=1
+[[ "${XFSR_BENCH_NO_OVERLAY:-0}" == "1" ]] && USE_OVERLAY=0
 
 QUICK="${XFSR_BENCH_QUICK:-0}"
 VK_ONLY="${XFSR_BENCH_VK_ONLY:-0}"
@@ -34,6 +41,9 @@ WIN_ONLY="${XFSR_BENCH_WINDOWED_ONLY:-0}"
 FS_ONLY="${XFSR_BENCH_FULLSCREEN_ONLY:-0}"
 X11_ONLY="${XFSR_BENCH_X11_ONLY:-0}"
 WL_ONLY="${XFSR_BENCH_WAYLAND_ONLY:-0}"
+MODES_ONLY="${XFSR_BENCH_MODES_ONLY:-0}"
+UPSCALERS_ONLY="${XFSR_BENCH_UPSCALERS_ONLY:-0}"
+PRESETS_ONLY="${XFSR_BENCH_PRESETS_ONLY:-0}"
 
 if [[ ! -x "$VK_BIN" ]] || [[ ! -x "$GL_BIN" ]]; then
   echo "xfsr-bench: building load apps..."
@@ -43,7 +53,7 @@ fi
 
 if [[ $USE_MANGOHUD -eq 1 ]]; then
   if ! command -v mangohud >/dev/null 2>&1 && [[ ! -e /usr/lib/mangohud/libMangoHud.so ]]; then
-    echo "xfsr-bench: mangohud not found (install mangohud, or XFSR_BENCH_NO_MANGOHUD=1)" >&2
+    echo "xfsr-bench: mangohud not found (install mangohud, or unset XFSR_BENCH_MANGOHUD)" >&2
     exit 1
   fi
 fi
@@ -65,8 +75,13 @@ fi
 
 MH_BASE=()
 [[ $USE_MANGOHUD -eq 1 ]] && MH_BASE=(mangohud)
-MH=()
-[[ $USE_MANGOHUD -eq 1 ]] && MH=(--mangohud)
+
+HUD_ARGS=()
+if [[ $USE_MANGOHUD -eq 1 ]]; then
+  HUD_ARGS=(--mangohud)
+elif [[ $USE_OVERLAY -eq 1 ]]; then
+  HUD_ARGS=(--overlay)
+fi
 
 OUT=(--output "${WIN_W}x${WIN_H}")
 
@@ -158,30 +173,71 @@ run_vk_suite() {
 
   if [[ "$QUICK" == "1" ]]; then
     run_case "vk $tag same-GPU quality" \
-      "$XFSR" "${OUT[@]}" "${MH[@]}" --no-zink --preset quality -- "$VK_BIN"
-    run_case "vk $tag same-GPU performance" \
-      "$XFSR" "${OUT[@]}" "${MH[@]}" --no-zink --preset performance -- "$VK_BIN"
-    run_case "vk $tag perf --no-rcas" \
-      "$XFSR" "${OUT[@]}" "${MH[@]}" --no-zink --preset performance --no-rcas -- "$VK_BIN"
-    run_case "vk $tag perf --offload" \
-      "$XFSR" "${OUT[@]}" "${MH[@]}" --no-zink --preset performance --offload --no-one-way -- "$VK_BIN"
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --no-zink --preset quality --no-offload -- "$VK_BIN"
+    run_case "vk $tag same-GPU perf" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --no-zink --preset performance --no-offload -- "$VK_BIN"
+    run_case "vk $tag mode: offload (one-way)" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --no-zink --preset performance --offload -- "$VK_BIN"
+    run_case "vk $tag mode: hybrid (edge on iGPU)" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --no-zink --preset performance --hybrid -- "$VK_BIN"
+    run_case "vk $tag mode: DSR 4K downsample" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --no-zink --dsr 4k --no-offload -- "$VK_BIN"
+    run_case "vk $tag mode: spoof-vram 8GB" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --no-zink --spoof-vram 8GB --preset performance --no-offload -- "$VK_BIN"
+    run_case "vk $tag upscaler: nis" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --no-zink --preset performance --upscaler nis --no-offload -- "$VK_BIN"
+    run_case "vk $tag upscaler: nearest (pixel art)" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --no-zink --preset performance --upscaler nearest --no-offload -- "$VK_BIN"
     return
   fi
 
-  run_case "vk $tag same-GPU quality" \
-    "$XFSR" "${OUT[@]}" "${MH[@]}" --no-zink --preset quality -- "$VK_BIN"
-  run_case "vk $tag same-GPU balanced" \
-    "$XFSR" "${OUT[@]}" "${MH[@]}" --no-zink --preset balanced -- "$VK_BIN"
-  run_case "vk $tag same-GPU performance" \
-    "$XFSR" "${OUT[@]}" "${MH[@]}" --no-zink --preset performance -- "$VK_BIN"
-  run_case "vk $tag same-GPU ultra" \
-    "$XFSR" "${OUT[@]}" "${MH[@]}" --no-zink --preset ultra -- "$VK_BIN"
-  run_case "vk $tag perf --no-rcas" \
-    "$XFSR" "${OUT[@]}" "${MH[@]}" --no-zink --preset performance --no-rcas -- "$VK_BIN"
-  run_case "vk $tag perf --offload" \
-    "$XFSR" "${OUT[@]}" "${MH[@]}" --no-zink --preset performance --offload --no-one-way -- "$VK_BIN"
-  run_case "vk $tag perf --offload --no-rcas" \
-    "$XFSR" "${OUT[@]}" "${MH[@]}" --no-zink --preset performance --offload --no-one-way --no-rcas -- "$VK_BIN"
+  # --- 1. Scaling Presets (Same-GPU) ---
+  if [[ "$MODES_ONLY" != "1" && "$UPSCALERS_ONLY" != "1" ]] || [[ "$PRESETS_ONLY" == "1" ]]; then
+    run_case "vk $tag same-GPU quality" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --no-zink --preset quality --no-offload -- "$VK_BIN"
+    run_case "vk $tag same-GPU balanced" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --no-zink --preset balanced --no-offload -- "$VK_BIN"
+    run_case "vk $tag same-GPU performance" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --no-zink --preset performance --no-offload -- "$VK_BIN"
+    run_case "vk $tag same-GPU ultra" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --no-zink --preset ultra --no-offload -- "$VK_BIN"
+    run_case "vk $tag perf --no-rcas" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --no-zink --preset performance --no-rcas --no-offload -- "$VK_BIN"
+  fi
+
+  # --- 2. Execution Modes ---
+  if [[ "$PRESETS_ONLY" != "1" && "$UPSCALERS_ONLY" != "1" ]] || [[ "$MODES_ONLY" == "1" ]]; then
+    run_case "vk $tag mode: offload (one-way)" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --no-zink --preset performance --offload -- "$VK_BIN"
+    run_case "vk $tag mode: offload round-trip" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --no-zink --preset performance --offload --no-one-way -- "$VK_BIN"
+    run_case "vk $tag mode: hybrid (edge on iGPU)" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --no-zink --preset performance --hybrid -- "$VK_BIN"
+    run_case "vk $tag mode: native passthrough" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --no-zink --native --no-offload -- "$VK_BIN"
+    run_case "vk $tag mode: DSR 4K downsample" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --no-zink --dsr 4k --no-offload -- "$VK_BIN"
+    run_case "vk $tag mode: spoof-vram 8GB" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --no-zink --spoof-vram 8GB --preset performance --no-offload -- "$VK_BIN"
+  fi
+
+  # --- 3. Upscalers (Evaluated at performance preset) ---
+  if [[ "$PRESETS_ONLY" != "1" && "$MODES_ONLY" != "1" ]] || [[ "$UPSCALERS_ONLY" == "1" ]]; then
+    run_case "vk $tag upscaler: edge (quality)" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --no-zink --preset performance --upscaler edge --edge-mode quality --no-offload -- "$VK_BIN"
+    run_case "vk $tag upscaler: edge (perf)" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --no-zink --preset performance --upscaler edge --edge-mode perf --no-offload -- "$VK_BIN"
+    run_case "vk $tag upscaler: edge (nearest)" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --no-zink --preset performance --upscaler edge --edge-mode nearest --no-offload -- "$VK_BIN"
+    run_case "vk $tag upscaler: fsr1" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --no-zink --preset performance --upscaler fsr1 --no-offload -- "$VK_BIN"
+    run_case "vk $tag upscaler: nis" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --no-zink --preset performance --upscaler nis --no-offload -- "$VK_BIN"
+    run_case "vk $tag upscaler: blit" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --no-zink --preset performance --upscaler blit --no-offload -- "$VK_BIN"
+    run_case "vk $tag upscaler: nearest (pixel art)" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --no-zink --preset performance --upscaler nearest --no-offload -- "$VK_BIN"
+  fi
 }
 
 run_gl_suite() {
@@ -192,33 +248,64 @@ run_gl_suite() {
     "${MH_BASE[@]}" "$GL_BIN"
 
   if [[ "$QUICK" == "1" ]]; then
-    run_case "gl $tag zink+xfsr performance" \
-      "$XFSR" "${OUT[@]}" "${MH[@]}" --zink --preset performance -- "$GL_BIN"
+    run_case "gl $tag zink performance" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --zink --preset performance --no-offload -- "$GL_BIN"
     run_case "gl $tag zink perf --no-rcas" \
-      "$XFSR" "${OUT[@]}" "${MH[@]}" --zink --preset performance --no-rcas -- "$GL_BIN"
-    run_case "gl $tag zink perf --offload" \
-      "$XFSR" "${OUT[@]}" "${MH[@]}" --zink --preset performance --offload --no-one-way -- "$GL_BIN"
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --zink --preset performance --no-rcas --no-offload -- "$GL_BIN"
+    run_case "gl $tag zink offload (one-way)" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --zink --preset performance --offload -- "$GL_BIN"
+    run_case "gl $tag zink hybrid (edge on iGPU)" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --zink --preset performance --hybrid -- "$GL_BIN"
+    run_case "gl $tag zink upscaler nis" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --zink --preset performance --upscaler nis --no-offload -- "$GL_BIN"
+    run_case "gl $tag zink upscaler nearest" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --zink --preset performance --upscaler nearest --no-offload -- "$GL_BIN"
     return
   fi
 
-  run_case "gl $tag zink+xfsr quality" \
-    "$XFSR" "${OUT[@]}" "${MH[@]}" --zink --preset quality -- "$GL_BIN"
-  run_case "gl $tag zink+xfsr balanced" \
-    "$XFSR" "${OUT[@]}" "${MH[@]}" --zink --preset balanced -- "$GL_BIN"
-  run_case "gl $tag zink+xfsr performance" \
-    "$XFSR" "${OUT[@]}" "${MH[@]}" --zink --preset performance -- "$GL_BIN"
-  run_case "gl $tag zink+xfsr ultra" \
-    "$XFSR" "${OUT[@]}" "${MH[@]}" --zink --preset ultra -- "$GL_BIN"
-  run_case "gl $tag zink perf --no-rcas" \
-    "$XFSR" "${OUT[@]}" "${MH[@]}" --zink --preset performance --no-rcas -- "$GL_BIN"
-  run_case "gl $tag zink perf --offload" \
-    "$XFSR" "${OUT[@]}" "${MH[@]}" --zink --preset performance --offload --no-one-way -- "$GL_BIN"
-  run_case "gl $tag zink perf --offload --no-rcas" \
-    "$XFSR" "${OUT[@]}" "${MH[@]}" --zink --preset performance --offload --no-one-way --no-rcas -- "$GL_BIN"
+  # --- 1. Scaling Presets (Same-GPU) ---
+  if [[ "$MODES_ONLY" != "1" && "$UPSCALERS_ONLY" != "1" ]] || [[ "$PRESETS_ONLY" == "1" ]]; then
+    run_case "gl $tag zink quality" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --zink --preset quality --no-offload -- "$GL_BIN"
+    run_case "gl $tag zink balanced" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --zink --preset balanced --no-offload -- "$GL_BIN"
+    run_case "gl $tag zink performance" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --zink --preset performance --no-offload -- "$GL_BIN"
+    run_case "gl $tag zink ultra" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --zink --preset ultra --no-offload -- "$GL_BIN"
+    run_case "gl $tag zink perf --no-rcas" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --zink --preset performance --no-rcas --no-offload -- "$GL_BIN"
+  fi
+
+  # --- 2. Execution Modes ---
+  if [[ "$PRESETS_ONLY" != "1" && "$UPSCALERS_ONLY" != "1" ]] || [[ "$MODES_ONLY" == "1" ]]; then
+    run_case "gl $tag zink offload (one-way)" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --zink --preset performance --offload -- "$GL_BIN"
+    run_case "gl $tag zink offload round-trip" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --zink --preset performance --offload --no-one-way -- "$GL_BIN"
+    run_case "gl $tag zink hybrid (edge on iGPU)" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --zink --preset performance --hybrid -- "$GL_BIN"
+    run_case "gl $tag zink DSR 4K downsample" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --zink --dsr 4k --no-offload -- "$GL_BIN"
+    run_case "gl $tag zink spoof-vram 8GB" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --zink --spoof-vram 8GB --preset performance --no-offload -- "$GL_BIN"
+  fi
+
+  # --- 3. Upscalers ---
+  if [[ "$PRESETS_ONLY" != "1" && "$MODES_ONLY" != "1" ]] || [[ "$UPSCALERS_ONLY" == "1" ]]; then
+    run_case "gl $tag zink upscaler edge" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --zink --preset performance --upscaler edge --no-offload -- "$GL_BIN"
+    run_case "gl $tag zink upscaler nis" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --zink --preset performance --upscaler nis --no-offload -- "$GL_BIN"
+    run_case "gl $tag zink upscaler blit" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --zink --preset performance --upscaler blit --no-offload -- "$GL_BIN"
+    run_case "gl $tag zink upscaler nearest" \
+      "$XFSR" "${OUT[@]}" "${HUD_ARGS[@]}" --zink --preset performance --upscaler nearest --no-offload -- "$GL_BIN"
+  fi
 }
 
 echo "xfsr-bench: ${SECONDS_N}s  complexity=${COMPLEXITY}  window=${WIN_W}x${WIN_H}"
-echo "  wsi=${WSI_MODES[*]}  modes=${DISPLAY_MODES[*]}  mangohud=$USE_MANGOHUD  quick=$QUICK"
+echo "  wsi=${WSI_MODES[*]}  modes=${DISPLAY_MODES[*]}  overlay=$USE_OVERLAY  mangohud=$USE_MANGOHUD  quick=$QUICK"
 echo "  DISPLAY=$SAVE_DISPLAY  WAYLAND_DISPLAY=${SAVE_WAYLAND:-<none>}"
 echo "Binaries: $VK_BIN / $GL_BIN"
 
@@ -289,7 +376,9 @@ done
 unset _base_ext _warn
 
 echo "Tip: VK/GL xfsr should shrink vs baseline on X11 and Wayland (e.g. 960x540 vs 1920x1080)."
-echo "     GL Wayland reports shrunk extent via the shim; judge FPS vs native GL too."
-echo "     --offload is usually slower (host round-trip). X11 is often faster than Wayland on hybrids."
-echo "Filters: XFSR_BENCH_QUICK=1  XFSR_BENCH_X11_ONLY=1  XFSR_BENCH_WAYLAND_ONLY=1"
+echo "     --offload uses low-overhead one-way iGPU presentation; --hybrid reconstructs with EdgePass on iGPU."
+echo "     --dsr 4k renders at 3840x2160 and downsamples with box filtering + CAS."
+echo "     --spoof-vram virtualizes local VRAM budget and spills excess allocations to system RAM."
+echo "Filters: XFSR_BENCH_QUICK=1  XFSR_BENCH_MODES_ONLY=1  XFSR_BENCH_UPSCALERS_ONLY=1"
+echo "         XFSR_BENCH_PRESETS_ONLY=1  XFSR_BENCH_X11_ONLY=1  XFSR_BENCH_WAYLAND_ONLY=1"
 echo "         XFSR_BENCH_WINDOWED_ONLY=1  XFSR_BENCH_FULLSCREEN_ONLY=1"

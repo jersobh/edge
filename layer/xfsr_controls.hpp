@@ -42,6 +42,9 @@ void notePresented();
 void publishPresentStatus(const char* mode, uint32_t renderW, uint32_t renderH,
                           uint32_t displayW, uint32_t displayH, uint32_t presents);
 
+// Register active GPU device names and topology for overlay telemetry
+void setDeviceInfo(const char* dgpuName, const char* igpuName, bool dgpuIsDiscrete, bool hasIgpu);
+
 // Call once from CreateInstance (or lazily). Safe to call repeatedly.
 void initFromEnv();
 

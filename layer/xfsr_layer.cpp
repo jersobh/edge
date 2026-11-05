@@ -458,6 +458,7 @@ struct DeviceData {
     PFN_vkCreateSampler CreateSampler = nullptr;
     PFN_vkAllocateMemory AllocateMemory = nullptr;
     VkPhysicalDeviceMemoryProperties memProps{};
+    VkPhysicalDeviceProperties props{};
 
     bool isDiscrete = false;
     uint32_t graphicsFamily = 0;
@@ -1005,6 +1006,7 @@ bool tryInitCompanionIgpu(DeviceData* dd, VkSurfaceKHR surface) {
         g_companionGdpa[keyOf(dd->igpu.device)] = dd->igpu.deviceGdpa;
     }
     logv("[xfsr] iGPU companion ready: %s\n", dd->igpu.props.deviceName);
+    xfsr_ctrl::setDeviceInfo(dd->props.deviceName, dd->igpu.props.deviceName, dd->isDiscrete, true);
     return true;
 }
 
@@ -1050,6 +1052,7 @@ bool setupOffloadPipeline(ProxySwapchain* ps, VkSwapchainKHR oldPresentSwapchain
         } else {
             ps->offloadIgpu = false;
         }
+        xfsr_ctrl::setDeviceInfo(dd->props.deviceName, ps->offloadIgpu ? dd->igpu.props.deviceName : nullptr, dd->isDiscrete, ps->offloadIgpu);
         // Prefer one-way iGPU present; round-trip when forced or XFSR_IGPU_PRESENT=0.
         if (ps->offloadIgpu) {
             const bool wantOneWay = igpuPresentWanted(dd) && !dd->forceRoundTripOffload;
@@ -2072,6 +2075,8 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateDevice(VkPhysicalDevice physicalDevice
     if (dd->graphicsQueue != VK_NULL_HANDLE) {
         g_queues[keyOf(dd->graphicsQueue)] = dd;
     }
+    dd->props = props;
+    xfsr_ctrl::setDeviceInfo(props.deviceName, nullptr, dd->isDiscrete, false);
     std::fprintf(stderr, "[xfsr] device %s (%s)\n", props.deviceName,
                  dd->isDiscrete ? "discrete" : "integrated/other");
     return VK_SUCCESS;
