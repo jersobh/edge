@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 # Controlled Benchmark Matrix for Cost-Aware Device & Memory Scheduler
-# Compares:
-#   Test A:  NVIDIA only, no spill (Baseline VRAM, c=4096)
+# Workloads that EXCEED physical single-GPU VRAM:
 #   Test B1: NVIDIA Native, WITHOUT VRAM spoofing (c=32768 -> CRASH / OOM)
 #   Test B2: NVIDIA + EdgeScale, WITH VRAM spoofing (c=32768 -> SUCCESS / Host Spill)
-#   Test C:  NVIDIA + AMD, layer split (Value of secondary GPU compute, c=4096)
 #   Test F:  NVIDIA + AMD, layer split + host spill (Multi-GPU oversubscription, c=32768)
 set -eo pipefail
 
