@@ -147,20 +147,22 @@ EdgeScale strictly separates two responsibilities:
 
 ### Controlled Benchmark Matrix (GTX 1650 4GB + AMD Vega 10 iGPU + 32GB RAM)
 
-#### 1. Real-World 8B Model Offload: TwIL-8B (Q4_K_M — 4.9 GB)
+#### 1. Beyond-VRAM Workload: TwIL-8B (Q4_K_M — 4.9 GB)
 
-On a 4 GB GPU, an 8B model cannot fit in physical VRAM. Without EdgeScale, users are forced to split between GPU and CPU (`-ngl 15`), creating a severe CPU compute bottleneck. EdgeScale's AI Orchestrator automatically unites the dGPU and iGPU memory pools to offload 100% of the model (`-ngl 40`):
+> **Where EdgeScale Shines:** When a model exceeds physical VRAM (4.9 GB model on a 4.0 GB card), native execution is bottlenecked because the driver must leave 18 layers on the CPU (`-ngl 15`). EdgeScale's AI Orchestrator automatically unites the dGPU and iGPU to offload **100% of the layers (`-ngl 40`)** into GPU memory:
 
 | Setup | Execution Mode | GPU Offload | Prompt (t/s) | Decode (t/s) | Speedup |
 |:---|:---|:---:|:---:|:---:|:---|
 | **Native Single GPU** | Baseline (`llama-cli -ngl 15`) | 15 / 33 layers (CPU bound) | 5.8 t/s | 3.6 t/s | 1.0x (Baseline) |
-| **EdgeScale Dual-GPU** | Auto-Orchestrated (`edgerun llama-cli -ngl 40`) | **33 / 33 layers (100% in VRAM)** | **34.2 t/s** | **8.3 t/s** | **~5.9x prompt (+490%) / 2.3x decode** |
+| **EdgeScale Dual-GPU** | Auto-Orchestrated (`edgerun llama-cli -ngl 40 -fa on -t 4`) | **33 / 33 layers (100% in VRAM)** | **38.2 t/s** | **8.1 t/s** | **~6.6x prompt (+558%) / 2.25x decode (+125%)** |
 
 #### 2. Context Stress & Memory Virtualization Matrix: Qwen 3.5 4.3B (Q4_K)
 
+> **Note on Test A:** When a small model fits entirely within single-GPU VRAM ($c=4096$, 2.78 GB), keeping 100% of the workload on local Tier 1 GDDR5 (128 GB/s) is optimal. EdgeScale's cost scheduler deliberately avoids splitting sub-4GB models. Multi-GPU orchestration and VRAM spoofing are designed for workloads that exceed physical memory (Tests B2, C, F):
+
 | Test | Configuration | Prompt (t/s) | Decode (t/s) | Result / Spill | Key Takeaway |
 |:---|:---|:---:|:---:|:---:|:---|
-| **Test A** | NVIDIA In-VRAM ($c=4096$) | 87.1 t/s | 31.2 t/s | 0 MB | Peak baseline inside native 4GB GDDR5 |
+| **Test A** | NVIDIA In-VRAM ($c=4096$) | 87.1 t/s | 31.2 t/s | 0 MB | *Ceiling Control*: Sub-4GB model kept 100% on GDDR5 |
 | **Test B1** | NVIDIA Native ($c=32768$, No Spoof) | **CRASH** | **CRASH** | `OutOfDeviceMemory` | Native driver hard OOM crash |
 | **Test B2** | NVIDIA + EdgeScale ($c=32768$, 8GB Spoof) | 40.4 t/s | 9.6 t/s | Host Spill / OK | **Virtualization succeeds** without OOM |
 | **Test C** | NVIDIA + AMD Layer Split ($c=4096$) | 47.6 t/s | 14.4 t/s | 0 MB | **+50% faster decode than host spill** (direct DDR4 access) |
