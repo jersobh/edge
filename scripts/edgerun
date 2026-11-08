@@ -1463,9 +1463,32 @@ else
 fi
 
 # Dual-GPU: keep both ICDs visible (do not set VK_ICD_FILENAMES to one GPU).
-# Prefer discrete via Mesa device-select when available (RADV/AMDVLK). NVIDIA ICD
-# ignores MESA_VK_DEVICE_SELECT; unset FORCE so both GPUs stay enumerable for --offload.
+# Prefer discrete via Mesa device-select when available (RADV/AMDVLK) AND via
+# EdgeScale's in-layer vkEnumeratePhysicalDevices hook (works on NVIDIA+AMD too).
+export XFSR_PREFER_DGPU="$PREFER_DGPU"
+export EDGESCALE_PREFER_DGPU="$PREFER_DGPU"
 if [[ $PREFER_DGPU -eq 1 ]]; then
+  if [[ $PRINT_ONLY -eq 0 ]] && command -v nvidia-smi >/dev/null 2>&1; then
+    _has_nv_pci=0
+    for _vfile in /sys/bus/pci/devices/*/vendor; do
+      if [[ -r "$_vfile" ]] && grep -qi "0x10de" "$_vfile" 2>/dev/null; then
+        _has_nv_pci=1
+        break
+      fi
+    done
+    if [[ $_has_nv_pci -eq 1 ]]; then
+      _nv_chk="$(nvidia-smi -L 2>&1)" || {
+        echo "========================================================================" >&2
+        echo "edgerun: WARNING — NVIDIA dGPU detected on PCI bus, but driver failed:" >&2
+        echo "  $_nv_chk" >&2
+        echo "Vulkan will fall back to your integrated GPU (low FPS)!" >&2
+        echo "Fix: Reboot your system so the kernel module matches the NVIDIA driver." >&2
+        echo "========================================================================" >&2
+      }
+      unset _nv_chk
+    fi
+    unset _has_nv_pci _vfile
+  fi
   if [[ -z "${MESA_VK_DEVICE_SELECT:-}" ]] && command -v vulkaninfo >/dev/null 2>&1; then
     dgpu_id="$(
       env -u ENABLE_XFSR -u VK_ADD_IMPLICIT_LAYER_PATH -u VK_LAYER_PATH \
@@ -1715,6 +1738,23 @@ wrap_gamescope() {
   local -a _gs_env=(
     "SDL_VIDEODRIVER="
   )
+  if [[ $SKIP_LAYER -eq 1 && "${HUD:-1}" != "0" ]]; then
+    local _gs_layer_dir
+    _gs_layer_dir="$(find_layer_dir 2>/dev/null || true)"
+    if [[ -n "$_gs_layer_dir" ]]; then
+      _gs_env+=(
+        "VK_ADD_IMPLICIT_LAYER_PATH=${_gs_layer_dir}"
+        "ENABLE_XFSR=1"
+        "DISABLE_XFSR="
+        "XFSR_FSR=0"
+        "XFSR_CAPS_SHRINK=0"
+        "XFSR_OFFLOAD=0"
+        "XFSR_HUD=1"
+        "XFSR_OVERLAY=${OVERLAY:-1}"
+        "XFSR_GAMESCOPE_OUT=${OUT_W}x${OUT_H}"
+      )
+    fi
+  fi
   if [[ $_gs_wsi -eq 1 ]]; then
     _gs_env+=("ENABLE_GAMESCOPE_WSI=1" "DISABLE_GAMESCOPE_WSI=0")
   else

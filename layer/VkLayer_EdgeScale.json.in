@@ -4,7 +4,7 @@
     "name": "VK_LAYER_EDGESCALE",
     "type": "GLOBAL",
     "library_path": "@LAYER_LIB_PATH@",
-    "api_version": "1.3.0",
+    "api_version": "1.4.0",
     "implementation_version": "8",
     "description": "EdgeScale in-process Vulkan upscaler & companion offload",
     "functions": {

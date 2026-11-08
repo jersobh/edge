@@ -455,7 +455,12 @@ void discoverGpus() {
             g.isNvidia = (vendor == 0x10deu);
 
             if (vendor == 0x1002u) {
-                if (g_metrics.gpuN > 0) {
+                char vramTotPath[340];
+                std::snprintf(vramTotPath, sizeof(vramTotPath),
+                              "/sys/class/drm/%s/device/mem_info_vram_total", name);
+                const unsigned long long vramTot = readSysUll(vramTotPath);
+                const bool isApu = (vramTot > 0 && vramTot <= (2ULL << 30));
+                if (g_metrics.gpuN > 0 || isApu) {
                     std::snprintf(g.tag, sizeof(g.tag), "iGPU");
                     std::snprintf(g.name, sizeof(g.name), "AMD Vega/Radeon");
                 } else {
@@ -467,7 +472,8 @@ void discoverGpus() {
                 std::snprintf(g.name, sizeof(g.name), "Intel HD/Iris");
             } else if (vendor == 0x10deu) {
                 std::snprintf(g.tag, sizeof(g.tag), "dGPU");
-                std::snprintf(g.name, sizeof(g.name), "GeForce GPU");
+                std::snprintf(g.name, sizeof(g.name),
+                              g_nvml.ready ? "GeForce GPU" : "GeForce GPU (driver offline)");
             } else {
                 std::snprintf(g.tag, sizeof(g.tag), "GPU");
                 std::snprintf(g.name, sizeof(g.name), "Generic GPU");
@@ -576,8 +582,16 @@ void formatStatusLocked(char* out, size_t n) {
     if (g_metrics.cpu >= 0) std::snprintf(cpu, sizeof(cpu), "%d%%", g_metrics.cpu);
 
     // --- Line 1: Mode, Upscaler, and Resolutions ---
+    const bool isPassthrough =
+        g_rt.lastRenderW && g_rt.lastDisplayW &&
+        g_rt.lastRenderW == g_rt.lastDisplayW &&
+        g_rt.lastRenderH == g_rt.lastDisplayH;
     const char* modeLabel = "SAME-GPU";
-    if (g_rt.offload) {
+    if (std::strcmp(g_rt.presentMode, "gamescope") == 0) {
+        modeLabel = "GAMESCOPE";
+    } else if (!g_rt.hasIgpu && !g_rt.dgpuIsDiscrete) {
+        modeLabel = isPassthrough ? "PASSTHROUGH (iGPU)" : "SAME-GPU (iGPU)";
+    } else if (g_rt.offload && (g_rt.hasIgpu || !g_rt.hasDgpu)) {
         if (g_rt.oneWay) {
             modeLabel = (g_rt.upscaler == Upscaler::Edge) ? "HYBRID (dGPU->iGPU)" : "OFFLOAD (1-way)";
         } else {
@@ -585,7 +599,7 @@ void formatStatusLocked(char* out, size_t n) {
         }
     } else if (g_rt.lastRenderW == 3840 && g_rt.lastDisplayW == 1920) {
         modeLabel = "DSR 4K (SSAA)";
-    } else if (g_rt.lastRenderW && g_rt.lastDisplayW && g_rt.lastRenderW == g_rt.lastDisplayW) {
+    } else if (isPassthrough) {
         modeLabel = "PASSTHROUGH";
     }
 
@@ -605,9 +619,17 @@ void formatStatusLocked(char* out, size_t n) {
 
     char resBuf[64] = "";
     if (g_rt.lastRenderW && g_rt.lastDisplayW) {
-        std::snprintf(resBuf, sizeof(resBuf), "%ux%u -> %ux%u (%.2fx)",
-                      g_rt.lastRenderW, g_rt.lastRenderH,
-                      g_rt.lastDisplayW, g_rt.lastDisplayH, g_rt.scale);
+        const float effScale =
+            static_cast<float>(g_rt.lastDisplayW) / static_cast<float>(g_rt.lastRenderW);
+        if (isPassthrough && (g_rt.scale > 1.01f || g_rt.scale < 0.99f)) {
+            std::snprintf(resBuf, sizeof(resBuf), "%ux%u -> %ux%u (1.00x, tgt %.2fx)",
+                          g_rt.lastRenderW, g_rt.lastRenderH,
+                          g_rt.lastDisplayW, g_rt.lastDisplayH, g_rt.scale);
+        } else {
+            std::snprintf(resBuf, sizeof(resBuf), "%ux%u -> %ux%u (%.2fx)",
+                          g_rt.lastRenderW, g_rt.lastRenderH,
+                          g_rt.lastDisplayW, g_rt.lastDisplayH, effScale);
+        }
     } else {
         std::snprintf(resBuf, sizeof(resBuf), "%.2fx %s", g_rt.scale, presetLabel(g_rt.scale, g_rt.presetIdx));
     }
@@ -625,17 +647,18 @@ void formatStatusLocked(char* out, size_t n) {
     for (int i = 0; i < g_metrics.gpuN; ++i) {
         auto& g = g_metrics.gpus[i];
         const char* tag = g.tag;
-        if (!g_rt.hasIgpu && !g_rt.dgpuIsDiscrete) {
-            tag = "iGPU";
-        }
         const char* name = g.name;
         if (std::strcmp(g.tag, "dGPU") == 0) {
-            const char* s = g_rt.dgpuName[0] ? g_rt.dgpuName : g.name;
-            if (std::strncmp(s, "NVIDIA GeForce ", 15) == 0) s += 15;
-            else if (std::strncmp(s, "NVIDIA ", 7) == 0) s += 7;
-            name = s;
+            if (g_rt.dgpuIsDiscrete && g_rt.dgpuName[0]) {
+                const char* s = g_rt.dgpuName;
+                if (std::strncmp(s, "NVIDIA GeForce ", 15) == 0) s += 15;
+                else if (std::strncmp(s, "NVIDIA ", 7) == 0) s += 7;
+                name = s;
+            }
         } else if (std::strcmp(g.tag, "iGPU") == 0) {
-            const char* s = g_rt.igpuName[0] ? g_rt.igpuName : g.name;
+            const char* s = g_rt.igpuName[0]
+                                ? g_rt.igpuName
+                                : ((!g_rt.dgpuIsDiscrete && g_rt.dgpuName[0]) ? g_rt.dgpuName : g.name);
             if (std::strncmp(s, "AMD Radeon ", 11) == 0) s += 11;
             else if (std::strncmp(s, "AMD ", 4) == 0) s += 4;
             name = s;
@@ -1501,6 +1524,9 @@ void publishPresentStatus(const char* mode, uint32_t renderW, uint32_t renderH,
     if (displayH) g_rt.lastDisplayH = displayH;
     if (renderW) g_rt.lastRenderW = renderW;
     if (renderH) g_rt.lastRenderH = renderH;
+    if (mode && mode[0]) {
+        std::snprintf(g_rt.presentMode, sizeof(g_rt.presentMode), "%s", mode);
+    }
     // Only mirror the effective ratio into the preset when caps-shrink is off (in-game
     // resolution defines scale). With caps-shrink on, --preset / F1 is authoritative —
     // an app that ignores the clamp (e.g. windowed 1280x720 on 1080p) must not flip

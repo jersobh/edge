@@ -406,6 +406,7 @@ struct InstanceData {
     PFN_vkGetInstanceProcAddr gipa = nullptr;
     PFN_vkDestroyInstance DestroyInstance = nullptr;
     PFN_vkEnumeratePhysicalDevices EnumeratePhysicalDevices = nullptr;
+    PFN_vkEnumeratePhysicalDeviceGroups EnumeratePhysicalDeviceGroups = nullptr;
     PFN_vkGetPhysicalDeviceProperties GetPhysicalDeviceProperties = nullptr;
     PFN_vkGetPhysicalDeviceMemoryProperties GetPhysicalDeviceMemoryProperties = nullptr;
     PFN_vkGetPhysicalDeviceMemoryProperties2 GetPhysicalDeviceMemoryProperties2 = nullptr;
@@ -1633,6 +1634,12 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateInstance(const VkInstanceCreateInfo* p
     id->DestroyInstance = getInstProc<PFN_vkDestroyInstance>(id, "vkDestroyInstance");
     id->EnumeratePhysicalDevices =
         getInstProc<PFN_vkEnumeratePhysicalDevices>(id, "vkEnumeratePhysicalDevices");
+    id->EnumeratePhysicalDeviceGroups =
+        getInstProc<PFN_vkEnumeratePhysicalDeviceGroups>(id, "vkEnumeratePhysicalDeviceGroups");
+    if (!id->EnumeratePhysicalDeviceGroups) {
+        id->EnumeratePhysicalDeviceGroups =
+            getInstProc<PFN_vkEnumeratePhysicalDeviceGroups>(id, "vkEnumeratePhysicalDeviceGroupsKHR");
+    }
     id->GetPhysicalDeviceProperties =
         getInstProc<PFN_vkGetPhysicalDeviceProperties>(id, "vkGetPhysicalDeviceProperties");
     id->GetPhysicalDeviceMemoryProperties =
@@ -1737,8 +1744,15 @@ void applyCapsShrink(InstanceData* id, VkPhysicalDevice physicalDevice,
     caps->currentExtent = {rw, rh};
     caps->minImageExtent.width = std::min(caps->minImageExtent.width, rw);
     caps->minImageExtent.height = std::min(caps->minImageExtent.height, rh);
-    caps->maxImageExtent.width = std::max(caps->maxImageExtent.width, rw);
-    caps->maxImageExtent.height = std::max(caps->maxImageExtent.height, rh);
+    if (rw < winW || rh < winH) {
+        // Upscaling (scale > 1.0): clamp maxImageExtent to {rw, rh} so DXVK/games
+        // that pass explicit 1080p dimensions clamp down to the 720p render size.
+        caps->maxImageExtent = {rw, rh};
+    } else {
+        // Supersampling / DSR (scale < 1.0): expand maxImageExtent so 4K/1440p is allowed.
+        caps->maxImageExtent.width = std::max(caps->maxImageExtent.width, rw);
+        caps->maxImageExtent.height = std::max(caps->maxImageExtent.height, rh);
+    }
     id->capsShrunk = true;
     if (winW != id->lastLogCw || winH != id->lastLogCh || rw != id->lastLogRw ||
         rh != id->lastLogRh) {
@@ -1755,6 +1769,118 @@ void applyCapsShrink(InstanceData* id, VkPhysicalDevice physicalDevice,
 InstanceData* anyInstance() {
     std::lock_guard<std::mutex> lock(g_mu);
     return g_instances.empty() ? nullptr : g_instances.begin()->second;
+}
+
+int preferDeviceMode() {
+    const char* s = xfsrEnv("XFSR_PREFER_DGPU", "EDGESCALE_PREFER_DGPU");
+    if (s && (std::strcmp(s, "0") == 0 || std::strcmp(s, "igpu") == 0)) return 0;
+    return 1; // Default: sort discrete GPU first so Proton/DXVK picks dGPU on hybrid laptops
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL xfsr_EnumeratePhysicalDevices(
+    VkInstance instance, uint32_t* pPhysicalDeviceCount, VkPhysicalDevice* pPhysicalDevices) {
+    InstanceData* id = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_mu);
+        auto it = g_instances.find(keyOf(instance));
+        if (it != g_instances.end()) id = it->second;
+    }
+    if (!id) id = anyInstance();
+    if (!id || !id->EnumeratePhysicalDevices) return VK_ERROR_INITIALIZATION_FAILED;
+    if (!pPhysicalDevices || !id->GetPhysicalDeviceProperties) {
+        return id->EnumeratePhysicalDevices(instance, pPhysicalDeviceCount, pPhysicalDevices);
+    }
+
+    uint32_t total = 0;
+    VkResult r = id->EnumeratePhysicalDevices(instance, &total, nullptr);
+    if (r != VK_SUCCESS || total == 0) {
+        return id->EnumeratePhysicalDevices(instance, pPhysicalDeviceCount, pPhysicalDevices);
+    }
+    std::vector<VkPhysicalDevice> all(total);
+    r = id->EnumeratePhysicalDevices(instance, &total, all.data());
+    if (r != VK_SUCCESS && r != VK_INCOMPLETE) return r;
+    all.resize(total);
+
+    const int pref = preferDeviceMode();
+    auto rankOf = [&](VkPhysicalDevice pd) -> int {
+        VkPhysicalDeviceProperties props{};
+        id->GetPhysicalDeviceProperties(pd, &props);
+        if (pref == 0) {
+            if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) return 0;
+            if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) return 1;
+            return 2;
+        }
+        if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) return 0;
+        if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) return 1;
+        return 2;
+    };
+    std::stable_sort(all.begin(), all.end(), [&](VkPhysicalDevice a, VkPhysicalDevice b) {
+        return rankOf(a) < rankOf(b);
+    });
+
+    const uint32_t cap = *pPhysicalDeviceCount;
+    const uint32_t toCopy = std::min(cap, total);
+    for (uint32_t i = 0; i < toCopy; ++i) pPhysicalDevices[i] = all[i];
+    *pPhysicalDeviceCount = toCopy;
+    return (cap < total) ? VK_INCOMPLETE : VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL xfsr_EnumeratePhysicalDeviceGroups(
+    VkInstance instance, uint32_t* pPhysicalDeviceGroupCount,
+    VkPhysicalDeviceGroupProperties* pPhysicalDeviceGroupProperties) {
+    InstanceData* id = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_mu);
+        auto it = g_instances.find(keyOf(instance));
+        if (it != g_instances.end()) id = it->second;
+    }
+    if (!id) id = anyInstance();
+    if (!id || !id->EnumeratePhysicalDeviceGroups) return VK_ERROR_INITIALIZATION_FAILED;
+    if (!pPhysicalDeviceGroupProperties || !id->GetPhysicalDeviceProperties) {
+        return id->EnumeratePhysicalDeviceGroups(
+            instance, pPhysicalDeviceGroupCount, pPhysicalDeviceGroupProperties);
+    }
+
+    uint32_t total = 0;
+    VkResult r = id->EnumeratePhysicalDeviceGroups(instance, &total, nullptr);
+    if (r != VK_SUCCESS || total == 0) {
+        return id->EnumeratePhysicalDeviceGroups(
+            instance, pPhysicalDeviceGroupCount, pPhysicalDeviceGroupProperties);
+    }
+    std::vector<VkPhysicalDeviceGroupProperties> all(total);
+    for (auto& g : all) {
+        g.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GROUP_PROPERTIES;
+        g.pNext = nullptr;
+    }
+    r = id->EnumeratePhysicalDeviceGroups(instance, &total, all.data());
+    if (r != VK_SUCCESS && r != VK_INCOMPLETE) return r;
+    all.resize(total);
+
+    const int pref = preferDeviceMode();
+    auto rankOf = [&](const VkPhysicalDeviceGroupProperties& g) -> int {
+        if (g.physicalDeviceCount == 0 || !g.physicalDevices[0]) return 2;
+        VkPhysicalDeviceProperties props{};
+        id->GetPhysicalDeviceProperties(g.physicalDevices[0], &props);
+        if (pref == 0) {
+            if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) return 0;
+            if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) return 1;
+            return 2;
+        }
+        if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) return 0;
+        if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) return 1;
+        return 2;
+    };
+    std::stable_sort(all.begin(), all.end(),
+                     [&](const VkPhysicalDeviceGroupProperties& a,
+                         const VkPhysicalDeviceGroupProperties& b) {
+                         return rankOf(a) < rankOf(b);
+                     });
+
+    const uint32_t cap = *pPhysicalDeviceGroupCount;
+    const uint32_t toCopy = std::min(cap, total);
+    for (uint32_t i = 0; i < toCopy; ++i) pPhysicalDeviceGroupProperties[i] = all[i];
+    *pPhysicalDeviceGroupCount = toCopy;
+    return (cap < total) ? VK_INCOMPLETE : VK_SUCCESS;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL xfsr_GetPhysicalDeviceSurfaceCapabilitiesKHR(
@@ -2346,10 +2472,12 @@ bool displayExtentHint(InstanceData* id, uint32_t* outW, uint32_t* outH) {
 // Adopt app device into dd->dgpu so identity overlay can submit (no FSR proxy).
 bool ensureDgpuAdopted(DeviceData* dd) {
     if (!dd) return false;
+    if (dd->dgpuReady) return true;
     try {
         dd->dgpu.deviceGdpa = dd->gdpa;
         dd->dgpu.adopt(dd->physical, dd->device, dd->graphicsFamily, dd->graphicsFamily);
         dd->dgpuReady = true;
+        xfsr_ctrl::setDeviceInfo(dd->dgpu.props.deviceName, "", dd->isDiscrete, false);
         return true;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "[xfsr] overlay adopt failed: %s\n", e.what());
@@ -2360,6 +2488,10 @@ bool ensureDgpuAdopted(DeviceData* dd) {
 VkResult createSwapchainPassthrough(DeviceData* dd, const VkSwapchainCreateInfoKHR* pCreateInfo,
                                     const VkAllocationCallbacks* pAllocator,
                                     VkSwapchainKHR* pSwapchain) {
+    struct CapsBypass {
+        CapsBypass() { ++g_bypassCapsShrink; }
+        ~CapsBypass() { --g_bypassCapsShrink; }
+    } capsBypass;
     VkSwapchainCreateInfoKHR ci = *pCreateInfo;
     ci.oldSwapchain = realOldSwapchain(dd, pCreateInfo->oldSwapchain);
     // Always restore full window size when not proxying — postage-stamp otherwise.
@@ -2689,11 +2821,27 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
         dd->inst && dd->inst->volkReady && fsrEnabled() && pCreateInfo && pCreateInfo->surface;
 
     if (!wantProxy) {
+        const uint32_t aw = pCreateInfo ? pCreateInfo->imageExtent.width : 0;
+        const uint32_t ah = pCreateInfo ? pCreateInfo->imageExtent.height : 0;
+        uint32_t dispW = aw, dispH = ah;
+        const char* gsOut = xfsrEnv("XFSR_GAMESCOPE_OUT", "EDGESCALE_GAMESCOPE_OUT");
+        if (gsOut && gsOut[0]) {
+            uint32_t pw = 0, ph = 0;
+            const char* mid = nullptr;
+            if (parseU32(gsOut, &pw, &mid) && mid && (*mid == 'x' || *mid == 'X') &&
+                parseU32(mid + 1, &ph) && pw > 0 && ph > 0) {
+                dispW = pw;
+                dispH = ph;
+            }
+        }
+        if (aw > 0 && ah > 0) {
+            xfsr_ctrl::publishPresentStatus(
+                (gsOut && gsOut[0]) ? "gamescope" : "identity", aw, ah, dispW, dispH, 0);
+        }
         std::fprintf(stderr,
                      "[xfsr] CreateSwapchain %ux%u passthrough (proxy off: volk=%d fsr=%d "
                      "discrete=%d zink=%d)\n",
-                     pCreateInfo ? pCreateInfo->imageExtent.width : 0,
-                     pCreateInfo ? pCreateInfo->imageExtent.height : 0,
+                     aw, ah,
                      dd->inst && dd->inst->volkReady ? 1 : 0, fsrEnabled() ? 1 : 0,
                      dd->isDiscrete ? 1 : 0, zinkActive() ? 1 : 0);
         return createSwapchainPassthrough(dd, pCreateInfo, pAllocator, pSwapchain);
@@ -4263,6 +4411,11 @@ PFN_vkVoidFunction resolveInstance(const char* pName) {
         return reinterpret_cast<PFN_vkVoidFunction>(::xfsr_GetDeviceProcAddr);
     if (std::strcmp(pName, "vkCreateDevice") == 0)
         return reinterpret_cast<PFN_vkVoidFunction>(xfsr_CreateDevice);
+    if (std::strcmp(pName, "vkEnumeratePhysicalDevices") == 0)
+        return reinterpret_cast<PFN_vkVoidFunction>(xfsr_EnumeratePhysicalDevices);
+    if (std::strcmp(pName, "vkEnumeratePhysicalDeviceGroups") == 0 ||
+        std::strcmp(pName, "vkEnumeratePhysicalDeviceGroupsKHR") == 0)
+        return reinterpret_cast<PFN_vkVoidFunction>(xfsr_EnumeratePhysicalDeviceGroups);
     if (std::strcmp(pName, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR") == 0)
         return reinterpret_cast<PFN_vkVoidFunction>(xfsr_GetPhysicalDeviceSurfaceCapabilitiesKHR);
     if (std::strcmp(pName, "vkGetPhysicalDeviceSurfaceCapabilities2KHR") == 0)
