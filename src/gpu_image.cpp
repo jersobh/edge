@@ -85,6 +85,14 @@ GpuImage createImage(DeviceContext* ctx, uint32_t width, uint32_t height, VkForm
     out.hostVisible = (memProps & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0;
 
     VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    if (tiling == VK_IMAGE_TILING_OPTIMAL &&
+        (format == VK_FORMAT_B8G8R8A8_UNORM || format == VK_FORMAT_B8G8R8A8_SRGB ||
+         format == VK_FORMAT_R8G8B8A8_UNORM || format == VK_FORMAT_R8G8B8A8_SRGB ||
+         format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 ||
+         format == VK_FORMAT_A2R10G10B10_UNORM_PACK32)) {
+        // Proton win32u / DXVK creates UNORM/SRGB views on swapchain images.
+        ici.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+    }
     ici.imageType = VK_IMAGE_TYPE_2D;
     ici.format = format;
     ici.extent = {width, height, 1};
@@ -95,7 +103,12 @@ GpuImage createImage(DeviceContext* ctx, uint32_t width, uint32_t height, VkForm
     ici.usage = usage;
     ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    vkCheck(d.CreateImage(ctx->device, &ici, nullptr, &out.image), "vkCreateImage");
+    VkResult imgRes = d.CreateImage(ctx->device, &ici, nullptr, &out.image);
+    if (imgRes != VK_SUCCESS && ici.flags != 0) {
+        ici.flags = 0;
+        imgRes = d.CreateImage(ctx->device, &ici, nullptr, &out.image);
+    }
+    vkCheck(imgRes, "vkCreateImage");
 
     VkMemoryRequirements req{};
     d.GetImageMemoryRequirements(ctx->device, out.image, &req);

@@ -745,9 +745,15 @@ void syncGlShimScaleEnvLocked() {
     char buf[32];
     std::snprintf(buf, sizeof(buf), "%.3f", g_rt.scale);
     setenv("XFSR_SCALE", buf, 1);
+    setenv("EDGESCALE_SCALE", buf, 1);
+    setenv("CROSSVULKAN_SCALE", buf, 1);
     // Drop absolute render hints — they were for launch display size and go stale.
     unsetenv("XFSR_RENDER_W");
     unsetenv("XFSR_RENDER_H");
+    unsetenv("EDGESCALE_RENDER_W");
+    unsetenv("EDGESCALE_RENDER_H");
+    unsetenv("CROSSVULKAN_RENDER_W");
+    unsetenv("CROSSVULKAN_RENDER_H");
 }
 
 // Continuous float scale. Recreate only when render pixels move ≥ hysteresis.

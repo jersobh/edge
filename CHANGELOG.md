@@ -8,6 +8,25 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **In-Layer Discrete GPU Priority (`layer/xfsr_layer.cpp` & `scripts/edgerun`)**:
+  - Hooked `vkEnumeratePhysicalDevices` and `vkEnumeratePhysicalDeviceGroups` (`KHR`) in the layer to sort `VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU` (NVIDIA GeForce GTX 1650) to `GPU0` and `VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU` (AMD Radeon Vega 10) to `GPU1` (or vice-versa when `--igpu` is passed).
+  - Both GPUs remain visible for `--offload` / `--hybrid`, and Proton/DXVK automatically picks the GTX 1650 without needing extra launch variables.
+- **Pre-Flight NVIDIA Driver / NVML Health Check (`scripts/edgerun`)**:
+  - Checks whether an NVIDIA PCI device (`0x10de`) exists on the bus when `nvidia-smi` fails (such as after a kernel/driver update before rebooting) and prints an immediate warning banner explaining why Vulkan would fall back to the iGPU.
+- **Preserved EdgeScale HUD Overlay Inside `--any` / `--gamescope` (`scripts/edgerun` & `layer/xfsr_layer.cpp`)**:
+  - Kept the host `gamescope` compositor unhooked (`DISABLE_XFSR=1`) while enabling the EdgeScale layer inside the nested game container in HUD mode (`XFSR_GAMESCOPE_OUT`), so the EdgeScale overlay and dGPU sorting still work when `--any` is used.
+
+### Fixed
+
+- **Restored `maxImageExtent` Clamping for Upscaling (`layer/xfsr_layer.cpp`)**:
+  - Fixed `applyCapsShrink` so that when upscaling (`rw < winW || rh < winH`), `caps->maxImageExtent` is clamped to `{rw, rh}` (`1280x720`), while DSR (`scale < 1.0`) continues to expand `maxImageExtent` with `std::max`.
+  - Games like *Sonic Frontiers* that pass explicit `1920x1080` swapchain dimensions to DXVK are now clamped down to `1280x720` by DXVK just like *Sonic Superstars*.
+- **Fixed Overlay GPU Deduplication & Effective Scale Readout (`layer/xfsr_controls.cpp`)**:
+  - Prevented the iGPU name/tag from overwriting the dGPU slot when running on an integrated GPU or when NVML is offline, and detected AMD APUs via `mem_info_vram_total`.
+  - Updated the resolution readout in `formatStatusLocked` to display the actual ratio (`1.00x, tgt 1.50x` when in passthrough vs `1.50x` when upscaling).
+
 ## [0.11.2] — 2026-11-05
 
 ### Added

@@ -564,6 +564,7 @@ std::mutex g_mu;
 // SIGSEGV in ICD/MangoHud (seen on gl zink+offload).
 std::mutex g_proxyLife;
 std::unordered_map<void*, InstanceData*> g_instances;
+std::unordered_map<void*, InstanceData*> g_physToInstance;
 std::unordered_map<void*, DeviceData*> g_devices;
 std::unordered_map<void*, DeviceData*> g_queues;
 std::unordered_map<void*, ProxySwapchain*> g_proxies;
@@ -588,6 +589,7 @@ bool g_loggedOverlaySkip = false;
 std::unordered_map<void*, PFN_vkGetDeviceProcAddr> g_companionGdpa;
 
 void* keyOf(VkInstance i) { return reinterpret_cast<void*>(i); }
+void* keyOf(VkPhysicalDevice p) { return reinterpret_cast<void*>(p); }
 void* keyOf(VkDevice d) { return reinterpret_cast<void*>(d); }
 void* keyOf(VkQueue q) { return reinterpret_cast<void*>(q); }
 void* keyOf(VkSwapchainKHR s) { return reinterpret_cast<void*>(s); }
@@ -865,7 +867,11 @@ static bool probeCompanionCandidates(DeviceData* dd, InstanceData* id, VkSurface
         }
         dual.integrated.physical = phys;
         dual.integrated.props = props;
-        vkGetPhysicalDeviceMemoryProperties(phys, &dual.integrated.memProps);
+        if (id->GetPhysicalDeviceMemoryProperties) {
+            id->GetPhysicalDeviceMemoryProperties(phys, &dual.integrated.memProps);
+        } else {
+            vkGetPhysicalDeviceMemoryProperties(phys, &dual.integrated.memProps);
+        }
         dual.integrated.timestampPeriod = props.limits.timestampPeriod;
         try {
             // Pass our layer's GIPA so the loader knows this layer is calling,
@@ -876,18 +882,19 @@ static bool probeCompanionCandidates(DeviceData* dd, InstanceData* id, VkSurface
                 xfsr_get_layer_gipa(),
                 id->layerDestroyDevice);
         } catch (const std::exception& e) {
-            logv("[xfsr] companion createLogical failed on %s: %s\n", props.deviceName,
-                 e.what());
+            std::fprintf(stderr, "[xfsr] companion createLogical failed on %s: %s\n",
+                         props.deviceName, e.what());
             dual.integrated = {};
             continue;
         }
         if (!dual.integrated.canPresent) {
-            logv("[xfsr] companion %s: no present support on this surface — "
-                 "same-GPU blit fallback\n",
-                 props.deviceName);
-            dual.integrated.destroy();
-            dual.integrated = {};
-            continue;
+            std::fprintf(stderr,
+                         "[xfsr] companion %s: no direct WSI present on this surface — "
+                         "using round-trip dual-GPU offload (dGPU->iGPU->dGPU)\n",
+                         props.deviceName);
+            dd->forceRoundTripOffload = true;
+            dual.presentDevice = &dd->dgpu;
+            return true;
         }
         dual.presentDevice = &dual.integrated;
         return true;
@@ -948,8 +955,13 @@ bool tryInitCompanionIgpu(DeviceData* dd, VkSurfaceKHR surface) {
     InstanceData* id = dd->inst;
     if (!id->layerCreateDevice || !id->layerDestroyDevice) {
         dd->igpuFailed = true;
-        logv("[xfsr] iGPU companion unavailable — loader CreateDevice callback missing\n");
+        std::fprintf(stderr,
+                     "[xfsr] iGPU companion unavailable — loader CreateDevice callback missing\n");
         return false;
+    }
+
+    if (id->instance) {
+        volkLoadInstance(id->instance);
     }
 
     // Offload is dGPU-render → iGPU-FSR. If the app device is already integrated
@@ -995,7 +1007,7 @@ bool tryInitCompanionIgpu(DeviceData* dd, VkSurfaceKHR surface) {
     g_bypassCreateDevice = false;
     if (!ok || !dual.integrated.device) {
         dd->igpuFailed = true;
-        logv("[xfsr] iGPU companion unavailable — same-GPU blit fallback\n");
+        std::fprintf(stderr, "[xfsr] iGPU companion unavailable — same-GPU fallback\n");
         return false;
     }
     dd->igpu = dual.integrated;
@@ -1006,7 +1018,7 @@ bool tryInitCompanionIgpu(DeviceData* dd, VkSurfaceKHR surface) {
         std::lock_guard<std::mutex> lock(g_mu);
         g_companionGdpa[keyOf(dd->igpu.device)] = dd->igpu.deviceGdpa;
     }
-    logv("[xfsr] iGPU companion ready: %s\n", dd->igpu.props.deviceName);
+    std::fprintf(stderr, "[xfsr] iGPU companion ready: %s\n", dd->igpu.props.deviceName);
     xfsr_ctrl::setDeviceInfo(dd->props.deviceName, dd->igpu.props.deviceName, dd->isDiscrete, true);
     return true;
 }
