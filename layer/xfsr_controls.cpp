@@ -605,7 +605,8 @@ void formatStatusLocked(char* out, size_t n) {
 
     char upscalerBuf[64] = "";
     if (g_rt.upscaler == Upscaler::Edge) {
-        const char* em = (g_rt.edgeMode == 2) ? "nearest" : (g_rt.edgePerf ? "perf" : "quality");
+        const char* em = (g_rt.edgeMode == 3) ? "competitive" :
+                         ((g_rt.edgeMode == 2) ? "nearest" : (g_rt.edgePerf ? "perf" : "quality"));
         std::snprintf(upscalerBuf, sizeof(upscalerBuf), "edge (%s, CAS:%.2f)", em, g_rt.edgeSharpness);
     } else if (g_rt.upscaler == Upscaler::Nis) {
         std::snprintf(upscalerBuf, sizeof(upscalerBuf), "NIS");
@@ -1081,13 +1082,15 @@ void applyHotkeyActions(const KeyBits& cur, const KeyBits& prev, bool modOk) {
     }
     if (rise(cur.f2, prev.f2)) {
         if (g_rt.upscaler == Upscaler::Edge) {
-            g_rt.edgeMode = (g_rt.edgeMode + 1) % 3;
+            g_rt.edgeMode = (g_rt.edgeMode + 1) % 4;
             g_rt.edgePerf = (g_rt.edgeMode == 1);
-            const char* mname = (g_rt.edgeMode == 2) ? "nearest" : (g_rt.edgeMode == 1 ? "perf" : "quality");
+            const char* mname = (g_rt.edgeMode == 3) ? "competitive" :
+                                ((g_rt.edgeMode == 2) ? "nearest" : (g_rt.edgeMode == 1 ? "perf" : "quality"));
             setenv("EDGESCALE_EDGE_MODE", mname, 1);
             setenv("XFSR_EDGE_MODE", mname, 1);
-            const char* label = (g_rt.edgeMode == 2) ? "edge nearest (pixel art)" :
-                                (g_rt.edgeMode == 1 ? "edge perf (lite)" : "edge quality");
+            const char* label = (g_rt.edgeMode == 3) ? "edge competitive (lowest latency)" :
+                                ((g_rt.edgeMode == 2) ? "edge nearest (pixel art)" :
+                                (g_rt.edgeMode == 1 ? "edge perf (lite)" : "edge quality"));
             armToastLocked(label);
         } else {
             g_rt.rcas = !g_rt.rcas;
@@ -1222,8 +1225,13 @@ void handleControlLineLocked(char* line) {
     } else if (std::strcmp(cmd, "edge_mode") == 0) {
         bool set = false;
         if (!arg[0] || std::strcmp(arg, "toggle") == 0) {
-            g_rt.edgeMode = (g_rt.edgeMode + 1) % 3;
+            g_rt.edgeMode = (g_rt.edgeMode + 1) % 4;
             g_rt.edgePerf = (g_rt.edgeMode == 1);
+            set = true;
+        } else if (std::strcmp(arg, "competitive") == 0 || std::strcmp(arg, "comp") == 0 ||
+                   std::strcmp(arg, "esports") == 0 || std::strcmp(arg, "3") == 0) {
+            g_rt.edgeMode = 3;
+            g_rt.edgePerf = false;
             set = true;
         } else if (std::strcmp(arg, "nearest") == 0 || std::strcmp(arg, "nn") == 0 ||
                    std::strcmp(arg, "pixel") == 0 || std::strcmp(arg, "2") == 0) {
@@ -1241,11 +1249,13 @@ void handleControlLineLocked(char* line) {
             set = true;
         }
         if (set) {
-            const char* mname = (g_rt.edgeMode == 2) ? "nearest" : (g_rt.edgeMode == 1 ? "perf" : "quality");
+            const char* mname = (g_rt.edgeMode == 3) ? "competitive" :
+                                ((g_rt.edgeMode == 2) ? "nearest" : (g_rt.edgeMode == 1 ? "perf" : "quality"));
             setenv("EDGESCALE_EDGE_MODE", mname, 1);
             setenv("XFSR_EDGE_MODE", mname, 1);
-            const char* label = (g_rt.edgeMode == 2) ? "edge nearest (pixel art)" :
-                                (g_rt.edgeMode == 1 ? "edge perf (lite)" : "edge quality");
+            const char* label = (g_rt.edgeMode == 3) ? "edge competitive (lowest latency)" :
+                                ((g_rt.edgeMode == 2) ? "edge nearest (pixel art)" :
+                                (g_rt.edgeMode == 1 ? "edge perf (lite)" : "edge quality"));
             armToastLocked(label);
         }
     } else if (std::strcmp(cmd, "fsr") == 0) {
@@ -1645,7 +1655,11 @@ void initFromEnv() {
         if (v >= 0.f && v <= 1.f) g_rt.edgeSharpness = v;
     }
     if (const char* em = xfsrEnv("XFSR_EDGE_MODE", "CROSSVULKAN_EDGE_MODE")) {
-        if (std::strcmp(em, "nearest") == 0 || std::strcmp(em, "nn") == 0 ||
+        if (std::strcmp(em, "competitive") == 0 || std::strcmp(em, "comp") == 0 ||
+            std::strcmp(em, "esports") == 0 || std::strcmp(em, "3") == 0) {
+            g_rt.edgeMode = 3;
+            g_rt.edgePerf = false;
+        } else if (std::strcmp(em, "nearest") == 0 || std::strcmp(em, "nn") == 0 ||
             std::strcmp(em, "pixel") == 0 || std::strcmp(em, "2") == 0) {
             g_rt.edgeMode = 2;
             g_rt.edgePerf = false;

@@ -6,6 +6,32 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
 
+## [0.13.1] — 2026-11-09
+
+### Fixed
+
+- **Native Passthrough Stutter & Freeze in *CS2* / Competitive Mode (`layer/xfsr_layer.cpp` & `scripts/edgerun`)**:
+  - **3-Slot Ring Overlay Synchronization**: Resolved a severe driver deadlock where `queuePresentWithOverlay` reused a single global binary semaphore (`g_overlayDoneSem`) and single fence (`g_overlayFence`) across consecutive frames on identity/passthrough swapchains. Replaced with a 3-slot multi-buffered ring buffer (`kOverlayRingSize = 3`), eliminating semaphore re-signaling race conditions and allowing asynchronous GPU presentation without blocking the CPU present thread.
+  - **Competitive Passthrough Bypass**: Completely bypassed `queuePresentWithOverlay` and swapchain `TRANSFER_DST` flag injection when `--competitive` / `EDGESCALE_LOW_LATENCY=1` is active, providing direct, uninhibited zero-overhead driver swapchain presentation.
+  - **Preserved `WAYLAND_DISPLAY` for Native Mode**: Prevented clearing `WAYLAND_DISPLAY` when `--native` is active, allowing native Linux titles like *Counter-Strike 2* (SDL3) to run directly on native Wayland without forced Xwayland compositing latency, frame pacing jitter, or Pango text layout assertion failures.
+
+## [0.13.0] — 2026-11-09
+
+### Added
+
+- **Competitive / Ultra-Low-Latency Mode (`--competitive` / `--esports`) & F2 Live Cycling**:
+  - Added dedicated **Competitive Mode** (`edge competitive`) designed for twitch and competitive shooters (*CS2*, *Apex Legends*, *Call of Duty / Warzone*).
+  - Implemented an ultra-lightweight directional reconstruction pass in [`shaders/edge_pass.comp.glsl`](file:///home/jeff/Projects/crossvulkan/shaders/edge_pass.comp.glsl) executing in sub-`0.08ms` on GTX 1650 / Vega 10 with zero barrier and LDS overhead.
+  - Added live hotkey cycling on **`F2`**: now cycles `quality` -> `perf` -> `nearest` -> `competitive` on the fly with in-game HUD toasts (`edge competitive (lowest latency)`).
+  - Automatically overrides WSI swapchain to `VK_PRESENT_MODE_IMMEDIATE_KHR` (or `MAILBOX`) in [`layer/xfsr_layer.cpp`](file:///home/jeff/Projects/crossvulkan/layer/xfsr_layer.cpp) via `EDGESCALE_LOW_LATENCY=1` to eliminate queue latency.
+  - Automatically tunes DXVK in [`scripts/edgerun`](file:///home/jeff/Projects/crossvulkan/scripts/edgerun) with `dxvk.syncInterval = 0`, `dxvk.numBackBuffers = 1`, and `DXVK_ASYNC=1` to minimize input lag and eliminate shader compilation stutter.
+- **DSR modes listed in-game (`scripts/edgerun`)**: when the render size is larger than the output (`--dsr 4k`, `--render 3840x2160 --output 1920x1080`), `edgerun` exports `WINE_FULLSCREEN_FSR=1` and `WINE_FULLSCREEN_FSR_CUSTOM_MODE=<render>`. Proton then lists 3840x2160 in the game's resolution menu on a 1080p monitor.
+
+### Fixed
+
+- **D3D9 games rendering on the iGPU (`scripts/edgerun`)**: DXVK D3D9 defaults to `d3d9.enumerateByDisplays = True`, which made adapter 0 the GPU wired to the laptop panel (AMD Vega 10) no matter how Vulkan devices were ordered (CoD4 was affected). `edgerun` now adds `dxvk.hideIntegratedGraphics = True; d3d9.enumerateByDisplays = False` to `DXVK_CONFIG` by default, and keeps any keys the user already set. The layer still sees the iGPU for `--offload` / `--hybrid`.
+- **Image clipped / not filling the screen (`layer/xfsr_layer.cpp`)**: when the X11 window is smaller than the display hint (CoD4 creates its first swapchain before Proton grows the window to fullscreen), the proxy now presents at the real window size instead of putting a 1920x1080 swapchain on a 1280x720 window. When `SUBOPTIMAL`/`OUT_OF_DATE` comes back and the window size has changed, the proxy now returns `VK_ERROR_OUT_OF_DATE_KHR` so the app rebuilds at the new size. Previously it ignored these forever.
+
 ## [0.12.0] — 2026-11-09
 
 ### Added

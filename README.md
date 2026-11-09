@@ -22,7 +22,7 @@ Wrap your game launch in Steam with `edgerun %command%` to render lower and reco
 </p>
 <p align="center"><a href="https://youtu.be/JAZmOpItF34">Watch the demo on YouTube</a></p>
 
-**Current version:** [0.11.2](https://github.com/jersobh/edge/releases/tag/v0.11.2)  
+**Current version:** [0.13.1](https://github.com/jersobh/edge/releases/tag/v0.13.1)  
 *(Formerly known as `xfsr`; `xfsr-run` and `XFSR_*` env vars remain as aliases.)*
 
 **Documentation & Deep-Dive:**
@@ -482,12 +482,12 @@ Needs CMake ≥ 3.20, C++17, `glslc`, Vulkan loader, and `libx11-dev` (GL shim X
 
 ## Versioning
 
-- [`VERSION`](VERSION) — **0.11.2**
+- [`VERSION`](VERSION) — **0.13.1**
 - [`CHANGELOG.md`](CHANGELOG.md)
 - Tag `vX.Y.Z` → GitHub Actions builds Linux AppImage + tarball and Windows Setup.exe + ZIP
 
 ```sh
-git tag v0.11.2 && git push origin v0.11.2
+git tag v0.13.1 && git push origin v0.13.1
 ```
 
 ## Credits

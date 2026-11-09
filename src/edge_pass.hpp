@@ -25,7 +25,7 @@ struct EdgePass {
     uint32_t displayW = 0;
     uint32_t displayH = 0;
     float sharpness = 0.60f; // 0..1 — overridable live / XFSR_EDGE_SHARPNESS
-    int edgeMode = 0;        // 0 = quality, 1 = perf, 2 = nearest (2D pixel art)
+    int edgeMode = 0;        // 0 = quality, 1 = perf, 2 = nearest, 3 = competitive
     bool perfMode = false;   // backward compat: true when edgeMode == 1
     bool swizzleBgra = false;
     VkFormat outputFormat = VK_FORMAT_R8G8B8A8_UNORM;

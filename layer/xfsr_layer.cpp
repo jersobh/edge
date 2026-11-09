@@ -578,9 +578,11 @@ struct PassthroughSc {
     bool transferDst = false;
 };
 std::unordered_map<void*, PassthroughSc> g_passthrough;
-VkSemaphore g_overlayDoneSem = VK_NULL_HANDLE;
-VkFence g_overlayFence = VK_NULL_HANDLE;
-VkCommandBuffer g_overlayCmd = VK_NULL_HANDLE;
+constexpr size_t kOverlayRingSize = 3;
+VkSemaphore g_overlayDoneSem[kOverlayRingSize]{};
+VkFence g_overlayFence[kOverlayRingSize]{};
+VkCommandBuffer g_overlayCmd[kOverlayRingSize]{};
+size_t g_overlayRingSlot = 0;
 DeviceData* g_overlaySyncDd = nullptr;
 bool g_overlaySyncReady = false;
 bool g_loggedOverlaySkip = false;
@@ -1133,14 +1135,29 @@ bool setupOffloadPipeline(ProxySwapchain* ps, VkSwapchainKHR oldPresentSwapchain
             sci.preTransform = ps->preTransform;
             sci.compositeAlpha = ps->compositeAlpha;
             sci.presentMode = ps->presentMode;
+            // Competitive / Low-latency mode (EDGESCALE_LOW_LATENCY=1 or XFSR_LOW_LATENCY=1):
+            // Override FIFO with IMMEDIATE (uncapped low lag) or MAILBOX (fast sync / no tearing).
+            const char* llEnv = xfsrEnv("EDGESCALE_LOW_LATENCY", "XFSR_LOW_LATENCY");
+            if (llEnv && llEnv[0] != '0') {
+                if (std::strcmp(llEnv, "mailbox") == 0) {
+                    sci.presentMode = VK_PRESENT_MODE_MAILBOX_KHR;
+                } else {
+                    sci.presentMode = VK_PRESENT_MODE_IMMEDIATE_KHR;
+                }
+            }
             sci.clipped = ps->clipped;
             sci.oldSwapchain = oldSc;
             VkResult cr = wsi.CreateSwapchainKHR(ctx->device, &sci, nullptr, out);
+            if (cr != VK_SUCCESS && sci.presentMode != ps->presentMode) {
+                // Fallback to app's requested presentMode if IMMEDIATE/MAILBOX was not supported by WSI
+                sci.presentMode = ps->presentMode;
+                cr = wsi.CreateSwapchainKHR(ctx->device, &sci, nullptr, out);
+            }
             if (cr != VK_SUCCESS && sci.minImageCount > std::max(2u, ps->minImageCount)) {
                 sci.minImageCount = std::max(2u, ps->minImageCount);
                 cr = wsi.CreateSwapchainKHR(ctx->device, &sci, nullptr, out);
             }
-            if (cr != VK_SUCCESS && ps->presentMode != VK_PRESENT_MODE_FIFO_KHR) {
+            if (cr != VK_SUCCESS && sci.presentMode != VK_PRESENT_MODE_FIFO_KHR) {
                 sci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
                 cr = wsi.CreateSwapchainKHR(ctx->device, &sci, nullptr, out);
             }
@@ -2366,13 +2383,15 @@ VKAPI_ATTR void VKAPI_CALL xfsr_DestroyDevice(VkDevice device,
         xfsr_ctrl::destroyOverlay(&dd->overlay);
         // Overlay sync: semaphore/fence on app device; cmd buffer in dgpu.cmdPool.
         if (g_overlaySyncDd == dd) {
-            if (dd->DestroySemaphore && g_overlayDoneSem)
-                dd->DestroySemaphore(dd->device, g_overlayDoneSem, nullptr);
-            if (dd->DestroyFence && g_overlayFence)
-                dd->DestroyFence(dd->device, g_overlayFence, nullptr);
-            g_overlayDoneSem = VK_NULL_HANDLE;
-            g_overlayFence = VK_NULL_HANDLE;
-            g_overlayCmd = VK_NULL_HANDLE;
+            for (size_t s = 0; s < kOverlayRingSize; ++s) {
+                if (dd->DestroySemaphore && g_overlayDoneSem[s])
+                    dd->DestroySemaphore(dd->device, g_overlayDoneSem[s], nullptr);
+                if (dd->DestroyFence && g_overlayFence[s])
+                    dd->DestroyFence(dd->device, g_overlayFence[s], nullptr);
+                g_overlayDoneSem[s] = VK_NULL_HANDLE;
+                g_overlayFence[s] = VK_NULL_HANDLE;
+                g_overlayCmd[s] = VK_NULL_HANDLE;
+            }
             g_overlaySyncDd = nullptr;
             g_overlaySyncReady = false;
         }
@@ -2520,7 +2539,12 @@ VkResult createSwapchainPassthrough(DeviceData* dd, const VkSwapchainCreateInfoK
     }
     // F10 overlay blits onto the WSI — needs TRANSFER_DST (bench only requests color).
     // Adopt early so exclusive-fullscreen identity (CoD/DXVK) can still draw the strip.
-    const bool wantHud = xfsr_ctrl::enabled();
+    // In competitive / low-latency mode, avoid injecting TRANSFER_DST so the driver can
+    // preserve optimal direct scanout / flipping without layer overhead.
+    const char* llEnv = xfsrEnv("EDGESCALE_LOW_LATENCY", "XFSR_LOW_LATENCY");
+    const char* compEnv = xfsrEnv("EDGESCALE_COMPETITIVE", "XFSR_COMPETITIVE");
+    const bool isComp = (llEnv && llEnv[0] != '0') || (compEnv && compEnv[0] != '0');
+    const bool wantHud = xfsr_ctrl::enabled() && !isComp;
     if (wantHud) (void)ensureDgpuAdopted(dd);
     const VkImageUsageFlags usageWithDst = ci.imageUsage | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     bool gotDst = false;
@@ -2561,27 +2585,39 @@ VkResult createSwapchainPassthrough(DeviceData* dd, const VkSwapchainCreateInfoK
 bool ensureOverlaySync(DeviceData* dd) {
     if (g_overlaySyncReady && g_overlaySyncDd == dd) return true;
     if (!dd || !ensureDgpuAdopted(dd) || !dd->CreateSemaphore || !dd->CreateFence) return false;
-    // Device changed (DXVK recreate) — previous sync objects are dead.
-    g_overlayDoneSem = VK_NULL_HANDLE;
-    g_overlayFence = VK_NULL_HANDLE;
-    g_overlayCmd = VK_NULL_HANDLE;
+    // Device changed (DXVK recreate) — cleanup previous sync objects.
+    if (g_overlaySyncDd && g_overlaySyncDd->device) {
+        for (size_t s = 0; s < kOverlayRingSize; ++s) {
+            if (g_overlaySyncDd->DestroySemaphore && g_overlayDoneSem[s])
+                g_overlaySyncDd->DestroySemaphore(g_overlaySyncDd->device, g_overlayDoneSem[s], nullptr);
+            if (g_overlaySyncDd->DestroyFence && g_overlayFence[s])
+                g_overlaySyncDd->DestroyFence(g_overlaySyncDd->device, g_overlayFence[s], nullptr);
+            g_overlayDoneSem[s] = VK_NULL_HANDLE;
+            g_overlayFence[s] = VK_NULL_HANDLE;
+            g_overlayCmd[s] = VK_NULL_HANDLE;
+        }
+    }
     g_overlaySyncReady = false;
     g_overlaySyncDd = nullptr;
+    g_overlayRingSlot = 0;
     dd->dgpu.loadDispatch();
     auto& d = dd->dgpu.vk;
     if (!dd->dgpu.cmdPool || !d.AllocateCommandBuffers) return false;
     VkSemaphoreCreateInfo sci{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
     VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     fci.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-    if (dd->CreateSemaphore(dd->device, &sci, nullptr, &g_overlayDoneSem) != VK_SUCCESS)
-        return false;
-    if (dd->CreateFence(dd->device, &fci, nullptr, &g_overlayFence) != VK_SUCCESS) return false;
-    // Own cmd buffer — never resetAndBegin() (that steals dgpu.fence → hang on toast).
+    for (size_t s = 0; s < kOverlayRingSize; ++s) {
+        if (dd->CreateSemaphore(dd->device, &sci, nullptr, &g_overlayDoneSem[s]) != VK_SUCCESS)
+            return false;
+        if (dd->CreateFence(dd->device, &fci, nullptr, &g_overlayFence[s]) != VK_SUCCESS)
+            return false;
+    }
+    // Ring of cmd buffers — never resetAndBegin() (that steals dgpu.fence → hang on toast).
     VkCommandBufferAllocateInfo cai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
     cai.commandPool = dd->dgpu.cmdPool;
     cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    cai.commandBufferCount = 1;
-    if (d.AllocateCommandBuffers(dd->dgpu.device, &cai, &g_overlayCmd) != VK_SUCCESS) return false;
+    cai.commandBufferCount = static_cast<uint32_t>(kOverlayRingSize);
+    if (d.AllocateCommandBuffers(dd->dgpu.device, &cai, g_overlayCmd) != VK_SUCCESS) return false;
     g_overlaySyncDd = dd;
     g_overlaySyncReady = true;
     return true;
@@ -2742,37 +2778,43 @@ bool queuePresentWithOverlay(DeviceData* dd, VkQueue queue, const VkPresentInfoK
     if (!d.ResetCommandBuffer || !d.BeginCommandBuffer || !d.EndCommandBuffer || !d.QueueSubmit)
         return false;
 
-    if (dd->WaitForFences(dd->device, 1, &g_overlayFence, VK_TRUE, UINT64_MAX) != VK_SUCCESS)
+    const size_t slot = g_overlayRingSlot;
+    VkFence curFence = g_overlayFence[slot];
+    VkSemaphore curDoneSem = g_overlayDoneSem[slot];
+    VkCommandBuffer curCmd = g_overlayCmd[slot];
+
+    // Wait on fence from kOverlayRingSize frames ago (almost always already signaled, no CPU stall!)
+    if (dd->WaitForFences(dd->device, 1, &curFence, VK_TRUE, 1000000000ull) != VK_SUCCESS)
         return false;
-    if (dd->ResetFences(dd->device, 1, &g_overlayFence) != VK_SUCCESS) return false;
-    if (d.ResetCommandBuffer(g_overlayCmd, 0) != VK_SUCCESS) return false;
+    if (dd->ResetFences(dd->device, 1, &curFence) != VK_SUCCESS) return false;
+    if (d.ResetCommandBuffer(curCmd, 0) != VK_SUCCESS) return false;
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    if (d.BeginCommandBuffer(g_overlayCmd, &bi) != VK_SUCCESS) return false;
+    if (d.BeginCommandBuffer(curCmd, &bi) != VK_SUCCESS) return false;
 
     // Preserve the frame: DXVK left PRESENT_SRC. UNDEFINED would discard the menu/scene
     // and only leave the status blit (CoD4 "overlay but no menu").
-    transitionImage(&dd->dgpu, g_overlayCmd, pt.images[idx], VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+    transitionImage(&dd->dgpu, curCmd, pt.images[idx], VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
                     VK_PIPELINE_STAGE_TRANSFER_BIT, 0, VK_ACCESS_TRANSFER_WRITE_BIT);
-    if (!xfsr_ctrl::recordOverlay(&dd->overlay, &dd->dgpu, g_overlayCmd, pt.images[idx], pt.w, pt.h,
+    if (!xfsr_ctrl::recordOverlay(&dd->overlay, &dd->dgpu, curCmd, pt.images[idx], pt.w, pt.h,
                                   status)) {
-        d.EndCommandBuffer(g_overlayCmd);
+        d.EndCommandBuffer(curCmd);
         // Leave fence signaled so the next attempt can proceed.
         VkSubmitInfo mark{VK_STRUCTURE_TYPE_SUBMIT_INFO};
         {
             std::lock_guard<std::recursive_mutex> qlock(g_queueSubmitMu);
-            d.QueueSubmit(queue ? queue : dd->dgpu.graphicsQueue, 1, &mark, g_overlayFence);
+            d.QueueSubmit(dd->dgpu.graphicsQueue ? dd->dgpu.graphicsQueue : queue, 1, &mark, curFence);
         }
         return false;
     }
-    transitionImage(&dd->dgpu, g_overlayCmd, pt.images[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+    transitionImage(&dd->dgpu, curCmd, pt.images[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                     VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_PIPELINE_STAGE_TRANSFER_BIT,
                     VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, 0);
-    if (d.EndCommandBuffer(g_overlayCmd) != VK_SUCCESS) return false;
+    if (d.EndCommandBuffer(curCmd) != VK_SUCCESS) return false;
 
-    // Submit on the present queue (DXVK may not use graphicsQueue for WSI).
-    VkQueue submitQ = queue ? queue : dd->dgpu.graphicsQueue;
+    // Submit on graphics queue matching the command pool family
+    VkQueue submitQ = dd->dgpu.graphicsQueue ? dd->dgpu.graphicsQueue : queue;
     std::vector<VkPipelineStageFlags> stages;
     if (pPresentInfo->waitSemaphoreCount > 0)
         stages.assign(pPresentInfo->waitSemaphoreCount, VK_PIPELINE_STAGE_TRANSFER_BIT);
@@ -2781,17 +2823,20 @@ bool queuePresentWithOverlay(DeviceData* dd, VkQueue queue, const VkPresentInfoK
     si.pWaitSemaphores = pPresentInfo->pWaitSemaphores;
     si.pWaitDstStageMask = stages.empty() ? nullptr : stages.data();
     si.commandBufferCount = 1;
-    si.pCommandBuffers = &g_overlayCmd;
+    si.pCommandBuffers = &curCmd;
     si.signalSemaphoreCount = 1;
-    si.pSignalSemaphores = &g_overlayDoneSem;
+    si.pSignalSemaphores = &curDoneSem;
     {
         std::lock_guard<std::recursive_mutex> qlock(g_queueSubmitMu);
-        if (d.QueueSubmit(submitQ, 1, &si, g_overlayFence) != VK_SUCCESS) return false;
+        if (d.QueueSubmit(submitQ, 1, &si, curFence) != VK_SUCCESS) return false;
     }
+
+    // Advance ring slot so next frame uses an independent semaphore/fence/cmd
+    g_overlayRingSlot = (g_overlayRingSlot + 1) % kOverlayRingSize;
 
     VkPresentInfoKHR pi = *pPresentInfo;
     pi.waitSemaphoreCount = 1;
-    pi.pWaitSemaphores = &g_overlayDoneSem;
+    pi.pWaitSemaphores = &curDoneSem;
     *outPr = dd->QueuePresentKHR(queue, &pi);
     if (*outPr == VK_SUCCESS || *outPr == VK_SUBOPTIMAL_KHR) xfsr_ctrl::notePresented();
     return true;
@@ -2996,7 +3041,7 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
             expectedRw >= 64 && expectedRh >= 64 &&
             std::abs(static_cast<int>(appW) - static_cast<int>(expectedRw)) <= 8 &&
             std::abs(static_cast<int>(appH) - static_cast<int>(expectedRh)) <= 8;
-        if (nearFullscreen || shrunkFullscreen || !zinkActive()) {
+        if (nearFullscreen || shrunkFullscreen || (!zinkActive() && !haveSurf)) {
             ps->displayW = hintW;
             ps->displayH = hintH;
             ps->renderW = appW;
@@ -3011,6 +3056,20 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
             }
             logv("[xfsr] in-game/hint proxy: render %ux%u → display hint %ux%u (scale %.2fx)\n",
                  appW, appH, hintW, hintH, dd->inst ? dd->inst->scale : 1.0f);
+        } else if (!zinkActive() && haveSurf) {
+            // X11 window is concretely smaller than the monitor hint (CoD4 creates its
+            // first swapchain before Proton grows the window to fullscreen). A
+            // hint-sized WSI on that window is clipped to the top-left corner and
+            // never fills the screen. Present at the real window size; when the
+            // window grows, the proxy present returns OUT_OF_DATE and we rebuild.
+            ps->renderW = appW;
+            ps->renderH = appH;
+            ps->displayW = surfW;
+            ps->displayH = surfH;
+            std::fprintf(stderr,
+                         "[xfsr] window %ux%u < display hint %ux%u — presenting at window "
+                         "size until it is resized\n",
+                         surfW, surfH, hintW, hintH);
         } else {
             // Windowed Zink with a mismatched monitor hint — recover window from scale.
             ps->renderW = appW;
@@ -3738,8 +3797,14 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
                 return VK_ERROR_OUT_OF_DATE_KHR;
             }
         }
-        // Identity / passthrough: still draw F10 overlay (proxy path does this above).
-        if (dd && xfsr_ctrl::enabled() && ctrl.showOverlay && ctrl.status[0]) {
+        // Identity / passthrough: only draw F10 overlay if not in competitive mode!
+        // In competitive / esports mode, avoid any injected submit, barrier, or semaphore wait.
+        const bool isComp = (ctrl.edgeMode == 3) ||
+                            ((xfsrEnv("EDGESCALE_COMPETITIVE", "XFSR_COMPETITIVE") != nullptr) &&
+                             xfsrEnv("EDGESCALE_COMPETITIVE", "XFSR_COMPETITIVE")[0] != '0') ||
+                            ((xfsrEnv("EDGESCALE_LOW_LATENCY", "XFSR_LOW_LATENCY") != nullptr) &&
+                             xfsrEnv("EDGESCALE_LOW_LATENCY", "XFSR_LOW_LATENCY")[0] != '0');
+        if (!isComp && dd && xfsr_ctrl::enabled() && ctrl.showOverlay && ctrl.status[0]) {
             VkResult opr = VK_SUCCESS;
             if (queuePresentWithOverlay(dd, queue, pPresentInfo, ctrl.status, &opr)) return opr;
         }
@@ -3987,7 +4052,19 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
                 // App must recreate — we share the real swapchain handle.
                 return VK_ERROR_OUT_OF_DATE_KHR;
             }
-            // Opaque dual-GPU: we own real WSI; don't force app recreate.
+            // Opaque dual-GPU: we own real WSI; don't force app recreate — unless the
+            // window size changed, in which case the proxy must be rebuilt.
+            {
+                uint32_t nowW = 0, nowH = 0;
+                if (!zinkActive() && queryTrueSurfaceExtent(dd, ps->surface, &nowW, &nowH) &&
+                    (nowW != ps->displayW || nowH != ps->displayH)) {
+                    std::fprintf(stderr,
+                                 "[xfsr] window resized %ux%u → %ux%u — recreating proxy "
+                                 "swapchain\n",
+                                 ps->displayW, ps->displayH, nowW, nowH);
+                    return VK_ERROR_OUT_OF_DATE_KHR;
+                }
+            }
             static bool loggedAcq = false;
             if (!loggedAcq) {
                 loggedAcq = true;
@@ -4368,7 +4445,20 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
         }
         // Same-GPU: app owns the real WSI — must propagate OUT_OF_DATE or images leak
         // and the next acquire hangs. Opaque dual-GPU: we own WSI; swallow + keep going.
-        // SUBOPTIMAL is safe to treat as SUCCESS for both (keep presenting).
+        // SUBOPTIMAL is safe to treat as SUCCESS for both (keep presenting) — unless
+        // the window itself changed size (Proton growing a 1280x720 window to
+        // fullscreen): then force a recreate so the proxy re-targets the new extent
+        // instead of staying clipped / postage-stamped forever.
+        if (pr == VK_SUBOPTIMAL_KHR || pr == VK_ERROR_OUT_OF_DATE_KHR) {
+            uint32_t nowW = 0, nowH = 0;
+            if (!zinkActive() && queryTrueSurfaceExtent(dd, ps->surface, &nowW, &nowH) &&
+                (nowW != ps->displayW || nowH != ps->displayH)) {
+                std::fprintf(stderr,
+                             "[xfsr] window resized %ux%u → %ux%u — recreating proxy swapchain\n",
+                             ps->displayW, ps->displayH, nowW, nowH);
+                return VK_ERROR_OUT_OF_DATE_KHR;
+            }
+        }
         if (pr == VK_ERROR_OUT_OF_DATE_KHR) {
             if (appOwnsRealWsi(ps)) return VK_ERROR_OUT_OF_DATE_KHR;
             static bool loggedOd = false;

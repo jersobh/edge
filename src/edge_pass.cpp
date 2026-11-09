@@ -43,6 +43,10 @@ float parseFloat01(const char* e) {
 
 int parseEdgeModeEnv(const char* e) {
     if (!e || !e[0]) return 0;
+    if (std::strcmp(e, "competitive") == 0 || std::strcmp(e, "comp") == 0 ||
+        std::strcmp(e, "esports") == 0 || std::strcmp(e, "lowlag") == 0 ||
+        std::strcmp(e, "3") == 0)
+        return 3;
     if (std::strcmp(e, "nearest") == 0 || std::strcmp(e, "nn") == 0 ||
         std::strcmp(e, "pixel") == 0 || std::strcmp(e, "2") == 0)
         return 2;

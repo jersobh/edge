@@ -64,6 +64,8 @@ RCAS="${EDGESCALE_RCAS:-${EDGE_RCAS:-${XFSR_RCAS:-${CROSSVULKAN_RCAS:-1}}}}"
 RCAS_CLI=0
 EDGE_MODE="${EDGESCALE_EDGE_MODE:-${EDGE_MODE:-${XFSR_EDGE_MODE:-perf}}}"
 EDGE_MODE_CLI=0
+COMPETITIVE="${EDGESCALE_COMPETITIVE:-0}"
+COMPETITIVE_CLI=0
 EDGE_SHARP="${EDGESCALE_EDGE_SHARPNESS:-${EDGE_SHARP:-${XFSR_EDGE_SHARPNESS:-}}}"
 EDGE_SHARP_CLI=0
 # Sampler mip LOD bias: auto = -log2(scale) when upscaler on; off|0|float. Offset adds tweak.
@@ -118,8 +120,9 @@ Options:
                                           fsr1 = AMD FidelityFX Super Resolution 1.0
                                           blit = linear blit at preset scale
                                           nearest = nearest-neighbor blit (2D pixel art)
-  --edge-mode quality|perf|nearest        EdgePass mode (default: quality; perf = edge-lite; nearest = 2D pixel art)
+  --edge-mode quality|perf|nearest|comp   EdgePass mode (default: quality; perf = edge-lite; nearest = 2D; comp = ultra-low-latency)
   --edge-sharpness 0..1                   EdgePass post-scale sharpen (default: 0.60)
+  --competitive / --esports               Competitive mode: lowest latency EdgePass, immediate present, DXVK low-latency
   --hybrid                                Full iGPU-native offload: dGPU renders low-res; iGPU reconstructs & presents.
                                           dGPU renders low-res; iGPU upscales + presents without back-haul.
   --native                                Passthrough mode (no upscaling/proxy)
@@ -527,8 +530,9 @@ while [[ $# -gt 0 ]]; do
         quality|hq|0) EDGE_MODE=quality ;;
         perf|lite|edge-lite|1) EDGE_MODE=perf ;;
         nearest|nn|pixel|2) EDGE_MODE=nearest ;;
+        competitive|comp|esports|lowlag|3) EDGE_MODE=competitive ;;
         *)
-          echo "edgerun: invalid --edge-mode '$EDGE_MODE' (quality|perf|nearest)" >&2
+          echo "edgerun: invalid --edge-mode '$EDGE_MODE' (quality|perf|nearest|competitive)" >&2
           exit 2
           ;;
       esac
@@ -540,11 +544,20 @@ while [[ $# -gt 0 ]]; do
         quality|hq|0) EDGE_MODE=quality ;;
         perf|lite|edge-lite|1) EDGE_MODE=perf ;;
         nearest|nn|pixel|2) EDGE_MODE=nearest ;;
+        competitive|comp|esports|lowlag|3) EDGE_MODE=competitive ;;
         *)
-          echo "edgerun: invalid --edge-mode '$EDGE_MODE' (quality|perf|nearest)" >&2
+          echo "edgerun: invalid --edge-mode '$EDGE_MODE' (quality|perf|nearest|competitive)" >&2
           exit 2
           ;;
       esac
+      ;;
+    --competitive|--esports)
+      COMPETITIVE=1
+      COMPETITIVE_CLI=1
+      EDGE_MODE="competitive"
+      EDGE_MODE_CLI=1
+      if [[ $UPSCALER_CLI -eq 0 ]]; then UPSCALER=edge; UPSCALER_CLI=1; FSR=1; FSR_CLI=1; NATIVE=0; fi
+      shift
       ;;
     --edge-sharpness|--edge-sharp)
       EDGE_SHARP="${2:?}"; EDGE_SHARP_CLI=1; shift 2
@@ -1441,7 +1454,7 @@ else
   # glamor on NVIDIA (eglInitialize failed → hang / llvmpipe).
   _cmd_base="$(basename -- "${1:-}" 2>/dev/null || true)"
   _keep_wl=0
-  if [[ $USE_GAMESCOPE -eq 1 ]]; then
+  if [[ $USE_GAMESCOPE -eq 1 || $NATIVE -eq 1 ]]; then
     _keep_wl=1
   elif [[ "${XFSR_VK_WAYLAND:-}" == "1" ]]; then
     _keep_wl=1
@@ -1501,6 +1514,44 @@ if [[ $PREFER_DGPU -eq 1 ]]; then
       unset MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE 2>/dev/null || true
     fi
   fi
+  # DXVK D3D9 defaults to d3d9.enumerateByDisplays=True: adapter 0 becomes the GPU
+  # wired to the laptop panel (the iGPU), ignoring Vulkan device order (CoD4 picked
+  # Vega 10 instead of the GTX 1650). Hide the iGPU from DXVK only — the EdgeScale
+  # layer still enumerates it for --offload / --hybrid.
+  _dxvk_add=""
+  [[ "${DXVK_CONFIG:-}" == *hideIntegratedGraphics* ]] || _dxvk_add="dxvk.hideIntegratedGraphics = True"
+  [[ "${DXVK_CONFIG:-}" == *enumerateByDisplays* ]] || _dxvk_add="${_dxvk_add:+$_dxvk_add; }d3d9.enumerateByDisplays = False"
+  if [[ -n "$_dxvk_add" ]]; then
+    export DXVK_CONFIG="${_dxvk_add}${DXVK_CONFIG:+; $DXVK_CONFIG}"
+  fi
+  unset _dxvk_add
+fi
+
+# Competitive mode optimizations (--competitive / --esports)
+if [[ $COMPETITIVE -eq 1 ]]; then
+  export EDGESCALE_COMPETITIVE=1
+  export EDGESCALE_LOW_LATENCY=1
+  export XFSR_LOW_LATENCY=1
+  export EDGESCALE_EDGE_MODE="competitive"
+  export XFSR_EDGE_MODE="competitive"
+  # Low-latency DXVK tuning: zero sync interval, async pipeline compile, minimal frame queuing
+  _comp_dxvk="dxvk.syncInterval = 0; dxvk.numBackBuffers = 1"
+  [[ "${DXVK_CONFIG:-}" != *syncInterval* ]] && DXVK_CONFIG="${_comp_dxvk}${DXVK_CONFIG:+; $DXVK_CONFIG}"
+  export DXVK_CONFIG
+  export DXVK_ASYNC="${DXVK_ASYNC:-1}"
+  export MESA_VK_WSI_PRESENT_MODE="${MESA_VK_WSI_PRESENT_MODE:-immediate}"
+  echo "edgerun: [COMPETITIVE] low-latency EdgePass, immediate present, zero sync-interval, async shaders enabled." >&2
+fi
+
+# DSR / supersampling (--dsr 4k, --render 3840x2160 --output 1920x1080): Proton only
+# lists display modes up to the monitor's native size. WINE_FULLSCREEN_FSR_CUSTOM_MODE
+# injects the render size into EnumDisplaySettings so D3D9/D3D11 games (CoD4) can pick
+# 3840x2160 in-game on a 1080p panel; Proton's fullscreen hack then presents it on the
+# real 1080p window and EdgeScale sharpens / offloads the final image.
+if [[ $RENDER_CLI -eq 1 ]] && (( RENDER_W > OUT_W || RENDER_H > OUT_H )); then
+  export WINE_FULLSCREEN_FSR="${WINE_FULLSCREEN_FSR:-1}"
+  export WINE_FULLSCREEN_FSR_CUSTOM_MODE="${WINE_FULLSCREEN_FSR_CUSTOM_MODE:-${RENDER_W}x${RENDER_H}}"
+  echo "edgerun: DSR mode ${WINE_FULLSCREEN_FSR_CUSTOM_MODE} exposed to Proton — select it in the game's video settings." >&2
 fi
 
 # An empty VK_ICD_FILENAMES / VK_DRIVER_FILES means "no drivers" to the loader.
