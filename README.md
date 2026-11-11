@@ -22,7 +22,7 @@ Wrap your game launch in Steam with `edgerun %command%` to render lower and reco
 </p>
 <p align="center"><a href="https://youtu.be/JAZmOpItF34">Watch the demo on YouTube</a></p>
 
-**Current version:** [0.13.1](https://github.com/jersobh/edge/releases/tag/v0.13.1)  
+**Current version:** [0.15.0](https://github.com/jersobh/edge/releases/tag/v0.15.0)  
 *(Formerly known as `xfsr`; `xfsr-run` and `XFSR_*` env vars remain as aliases.)*
 
 **Documentation & Deep-Dive:**
@@ -32,7 +32,7 @@ Wrap your game launch in Steam with `edgerun %command%` to render lower and reco
 ## What it does
 
 Games spend most of their time rasterizing each frame. **EdgeScale** asks the game to draw at a lower internal resolution (e.g. 960×540 or 1280×720 instead of 1920×1080 / 3840×2160), then reconstructs the image to your display using:
-- **`edge` (Default / Recommended):** High-occupancy sub-pixel edge tangent reconstruction, anti-ringing Catmull-Rom cubic filtering, and Contrast-Adaptive Sharpening (CAS).
+- **`edge` (Default / Recommended):** High-occupancy sub-pixel edge tangent reconstruction, anti-ringing Catmull-Rom cubic filtering, and Contrast-Adaptive Sharpening (CAS). Supports 4 distinct modes: `quality` (full edge reconstruction), `perf` (lightweight), `nearest` (2D pixel art), and `competitive` (sub-0.08ms ultra-low latency for esports).
 - **`nis`:** NVIDIA Image Scaling compute shader.
 - **`blit`:** Pure linear blit at preset scale.
 - **`nearest`:** Nearest-neighbor blit — crisp integer-friendly upscale for **2D pixel art**.
@@ -41,16 +41,29 @@ You do **not** need the game to have built-in upscaling. EdgeScale hooks in thro
 
 **Works with:** Native Vulkan, Proton/DXVK (64-bit and 32-bit via automatic `PROTON_USE_WOW64=1`), and OpenGL via automatic Zink detection (with an `LD_PRELOAD` shim that remaps viewports, scissors, FBO blits, and SDL drawable queries).  
 **Modes:** Dual-GPU iGPU offload by default (`--offload` with one-way iGPU presentation or fused async round-trip fallback), `--hybrid` (dGPU render + iGPU `edge` upscale + one-way present), or `--no-offload` (same-GPU).  
+**Performance & Thermals:** Built-in hardware fan control (`--fan`) via `nbfc` EC management, CPU/GPU thermal telemetry, and latency isolation against in-game voting keys.  
 **Tested on:** Hybrid laptops (e.g. NVIDIA dGPU + AMD Vega iGPU) and discrete cards.
 
 ### Quick Steam Launch Options
 
 ```text
+# Standard upscaling (render 720p/540p -> 1080p display)
 edgerun --preset performance %command%
+
+# Competitive shooters (CS2, Apex, Warzone: sub-0.08ms EdgePass, zero DXVK latency, auto fan optimization)
+gamemoderun edgerun --competitive %command%
+
+# Native resolution passthrough with EdgePass CAS sharpening (<0.08ms) & thermal management
+gamemoderun edgerun --competitive --native %command%
+
+# Full hybrid offload (dGPU renders, iGPU upscales and presents)
 edgerun --hybrid --preset performance %command%
+
+# 4K downsampling (DSR / SSAA) with VRAM capacity spoofing
 edgerun --dsr 4k --spoof-vram 8GB %command%
-edgerun --any --preset performance --gamescope-fs %command%
-edgerun --output 3840x2160 --render 1280x720 --upscaler nearest %command%
+
+# Automatic fan optimization via nbfc to prevent thermal throttling
+edgerun --preset performance --fan opt %command%
 ```
 *(You can also continue using `xfsr-run` interchangeably.)*
 
@@ -127,6 +140,49 @@ edgerun --spoof-vram 12GB %command%
 *(Note: Pushing textures far beyond physical VRAM capacity can cause PCIe bus stutter).*
 
 `--no-rcas` disables the optional sharpening pass on upscalers that support it — often a bit more FPS, slightly softer image.
+
+### Competitive & Esports Mode (`--competitive` / `--esports`)
+
+Designed specifically for twitch shooters (*Counter-Strike 2*, *Apex Legends*, *Warzone*, *Overwatch 2*):
+```text
+gamemoderun edgerun --competitive %command%
+```
+- **Sub-0.08ms EdgePass:** Uses the ultra-lightweight `competitive` EdgePass mode with single-pass directional sharpening and zero LDS/barrier overhead.
+- **Immediate Presentation:** Forces `VK_PRESENT_MODE_IMMEDIATE_KHR` (or `MAILBOX`) WSI presentation, eliminating queue latency and display sync lag.
+- **DXVK Low-Latency:** Injects `dxvk.syncInterval = 0`, `dxvk.numBackBuffers = 1`, and `DXVK_ASYNC = 1` to eliminate frame queuing and prevent shader compilation hitching.
+- **Auto Fan Cooling:** Automatically sets `--fan opt` to maintain low temperatures and prevent CPU/GPU thermal downclocking.
+- **In-Game Vote Protection:** Isolates hotkeys so pressing bare `F1` (Vote YES) or `F2` (Vote NO) in CS2 never triggers swapchain recreation or crashing.
+
+### Hardware Fan Control & Anti-Throttling (`--fan`)
+
+Prevents thermal throttling on laptops (e.g. Acer Nitro 5, ASUS TUF, Lenovo Legion) via `nbfc` EC management:
+```text
+edgerun --fan opt %command%
+edgerun --fan max %command%
+edgerun --fan balanced %command%
+edgerun --fan 80 %command%
+```
+- **`opt` (Auto-Optimized, Recommended):** Reactive dynamic curve monitoring peak temperature across CPU and all GPUs (50% < 62°C, 70% at 62°C, 85% at 70°C, 100% at ≥78°C) with hysteresis damping to eliminate fan thrashing.
+- **`max` (100%) / `balanced` (75%) / `quiet` (50%) / `auto` (EC default):** Fixed profiles.
+- **Non-blocking asynchronous thread:** Fan commands are dispatched in the background with zero impact on frame presentation times.
+- **Live in-game cycling:** Press **`Shift+F6`** (or **`PageDown`**) anytime in-game to cycle modes on the fly.
+
+### Native 1:1 Passthrough (`--native`)
+
+Run at native display resolution (no upscaling) while enjoying EdgeScale's low-overhead CAS sharpening pass, companion fan curves, and HUD telemetry:
+```text
+gamemoderun edgerun --competitive --native %command%
+```
+When `renderSize == displaySize`, EdgePass automatically engages the fast 5-tap CAS filter (<0.08ms compute time) and preserves native Wayland presentation without compositor latency.
+
+### Modern HUD Overlay & Real-Time Telemetry
+
+EdgeScale features an in-game telemetry card rendered directly into the presentation swapchain:
+- **Obsidian slate glass card** (`rgba(12, 16, 24, 235)`) with rounded corners and top cyan-to-violet glowing gradient header.
+- **Drop-shadowed typography** with color-coded thermals (<65°C mint green, 65–75°C amber, ≥76°C red).
+- **Dual-GPU metrics:** Live monitoring of both discrete dGPU (NVIDIA NVML) and integrated iGPU (DRM sysfs) with sanitized model names (e.g. `[GTX 1650]` and `[Vega 10]`), load %, thermals, and VRAM usage.
+- **CPU telemetry:** Real-time CPU usage % and package temperature via sysfs hardware monitor discovery (`k10temp`, `coretemp`, `zenpower`).
+- **Dynamic layout:** Automatically scales to fit any resolution from 720p to 4K with zero text clipping. Pin or unpin anytime with **`Shift+F10`** (or **`Pause`**).
 
 ## AI & Distributed GPU Memory Management
 
@@ -273,10 +329,15 @@ Because EdgeScale is an implicit Vulkan layer, it activates when the environment
 
 #### In-Game Hotkeys & HUD Overlay
 
-- **F10**: **Pin / Unpin HUD Overlay**. *(The overlay is unpinned by default unless `EDGESCALE_OVERLAY=1` is set; press `F10` to keep the stats strip on screen).*
-- **F1**: Cycle scaling preset (`quality` 1.5× → `balanced` 1.7× → `performance` 2.0× → `ultra` 2.5×)
-- **F2**: Cycle EdgePass mode (`quality` → `perf` → `nearest` pixel art) or toggle RCAS sharpening
-- **F3**: Cycle spatial upscaler (`edge` → `fsr1` → `blit` → `nearest` → `nis`)
+To prevent conflicting with in-game actions (e.g. voting or weapon slots), EdgeScale defaults to **`Shift+F*`** combinations on Windows, or the dedicated navigation cluster:
+
+- **Shift+F10** (or **Pause**): **Pin / Unpin HUD Overlay**. *(The overlay is unpinned by default unless `EDGESCALE_OVERLAY=1` is set)*
+- **Shift+F1** (or **Insert**): Cycle scaling preset (`quality` 1.5× → `balanced` 1.7× → `performance` 2.0× → `ultra` 2.5×)
+- **Shift+F2** (or **Home**): Cycle EdgePass mode (`quality` → `perf` → `nearest` pixel art → `competitive` ultra-low latency) or toggle RCAS sharpening
+- **Shift+F3** (or **PageUp**): Cycle spatial upscaler (`edge` → `fsr1` → `blit` → `nearest` → `nis`)
+- **Shift+F4** (or **Delete**): Toggle dual-GPU offload
+- **Shift+F5** (or **End**): Toggle one-way presentation
+- **Shift+F6** (or **PageDown**): Cycle fan mode (on supported hardware)
 
 #### Quick Smoke Test
 Verify your Windows installation in seconds:
@@ -351,18 +412,19 @@ edgerun --layer-dir ./build --check
 | `--preset quality\|balanced\|performance\|ultra` | How much to lower render resolution (`ultra` = 2.5×) |
 | `--output WxH` | Present / display size (default: auto-detect primary display) |
 | `--render WxH` | Absolute internal render size (overrides preset-derived scale) |
+| `--competitive` / `--esports` | Esports mode: sub-0.08ms EdgePass, immediate WSI present, DXVK async/syncInterval=0, dynamic auto-fan, safe hotkeys |
 | `--dsr 4k\|1440p\|<val>` | Supersampling / Virtual Super Resolution downsampling (e.g. 4K on 1080p display) |
 | `--spoof-vram [SIZE]` | Spoof reported VRAM capacity (e.g. `8GB`, `12GB`, `auto`) and enable host RAM spilling |
 | `--blit` | Same scale, linear blit (no spatial upscaler) |
 | `--upscaler blit\|nearest\|nis\|edge\|fsr1` | Spatial upscaler (`nearest` = pixel art; `edge` = recommended) |
-| `--edge-mode quality\|perf\|nearest` | EdgePass mode: quality (sub-pixel edge tangent + CAS), perf/lite, or nearest (2D pixel art) |
+| `--edge-mode quality\|perf\|nearest\|comp` | EdgePass mode: `quality` (sub-pixel tangent + CAS), `perf` (lite), `nearest` (2D pixel art), `comp` (sub-0.08ms esports) |
 | `--edge-sharpness 0..1` | EdgePass post-scale sharpen (default 0.60) |
 | `--lod-bias auto\|off\|<float>` | Negative mip LOD on app samplers (default `auto` = `-log2(scale)`) |
 | `--lod-bias-offset <float>` | Added to LOD bias (e.g. `-0.5`) |
 | `--hybrid` | Offload + one-way + `edge`; fused round-trip fallback if one-way fails |
 | `--gamescope` | Nest game at preset render size; gamescope upscales to `--output` (CS2) |
 | `--gamescope-filter fsr\|nis\|linear\|nearest\|…` | Override gamescope `-F` (default from `--upscaler`) |
-| `--native` | No upscale — passthrough swapchain |
+| `--native` | Native 1:1 passthrough swapchain with fast CAS sharpening pass (<0.08ms compute) |
 | `--no-rcas` | Skip sharpening — usually more FPS |
 | `--offload` / `--no-offload` | dGPU render, iGPU upscale + present (default: `--offload`) |
 | `--one-way` / `--no-one-way` | iGPU present (default with `--offload`) or fused round-trip. One-way skips MangoHud and pins the EdgeScale overlay |
@@ -443,10 +505,13 @@ EdgeScale uses **`EDGESCALE_*`** (or `EDGE_*`) environment variables. Legacy **`
 | Variable | Description |
 |----------|-------------|
 | `ENABLE_EDGESCALE=1` | Enable EdgeScale Vulkan layer (Windows & Linux; alias `ENABLE_XFSR=1`) |
+| `EDGESCALE_COMPETITIVE=1` | Enable competitive mode: sub-0.08ms EdgePass, immediate WSI present, DXVK async/syncInterval=0 |
 | `EDGESCALE_PRESET` | Preset mode: `quality` (1.5×), `balanced` (1.7×), `performance` (2.0×), `ultra` (2.5×) |
 | `EDGESCALE_UPSCALER` | Active upscaler: `edge`, `fsr1`, `nis`, `blit`, or `nearest` |
-| `EDGESCALE_EDGE_MODE` | EdgePass mode: `quality` (sub-pixel tangent + CAS), `perf` (lite), or `nearest` (2D pixel art) |
+| `EDGESCALE_EDGE_MODE` | EdgePass mode: `quality`, `perf` (lite), `nearest` (2D pixel art), or `competitive` (sub-0.08ms esports) |
 | `EDGESCALE_EDGE_SHARPNESS` | EdgePass post-scale sharpness (0.0 to 1.0, default 0.60) |
+| `EDGESCALE_FAN` | Hardware fan control mode: `auto`, `opt`, `balanced` (75%), `max` (100%), `quiet` (50%), or percent `10..100` |
+| `EDGESCALE_HOTKEYS` | In-game hotkeys mapping: `shift` (default), `alt`, `ctrl`, `ctrl_alt`, `nav`, `bare`, `none` |
 | `EDGESCALE_RCAS` | Contrast-Adaptive Sharpening pass toggle (`1` = on, `0` = off) |
 | `EDGESCALE_OFFLOAD` | Dual-GPU companion offload (`1` = on by default, `0` = same-GPU) |
 | `EDGESCALE_IGPU_PRESENT=1` | One-way direct iGPU presentation (default with offload; zero back-haul transfer) |
@@ -458,7 +523,7 @@ EdgeScale uses **`EDGESCALE_*`** (or `EDGE_*`) environment variables. Legacy **`
 | `EDGESCALE_SPOOF_VRAM` | Spoofed VRAM capacity reported to Vulkan apps (`8GB`, `12GB`, `16GB`, `auto`) |
 | `EDGESCALE_HUD=0` | Disable in-game hotkeys and toast messages |
 | `EDGESCALE_OVERLAY=1` | Pin HUD status strip at launch (same as `--overlay`) |
-| `EDGESCALE_HUD_MOD=1` | Require Shift+F* for hotkeys (default: bare F-keys) |
+| `EDGESCALE_HUD_MOD=1` | Legacy modifier toggle (require Shift+F* for hotkeys; now default) |
 | `EDGESCALE_CONTROL=/path` | Override control-file path (default `$XDG_RUNTIME_DIR/edgescale-control`) |
 | `EDGESCALE_CAPS_SHRINK=0` | Disable surface extent clamping for stubborn engines |
 | `EDGESCALE_ADAPTIVE=1` | Enable dynamic frame-time scaling toward target framerate |
@@ -489,12 +554,12 @@ Needs CMake ≥ 3.20, C++17, `glslc`, Vulkan loader, and `libx11-dev` (GL shim X
 
 ## Versioning
 
-- [`VERSION`](VERSION) — **0.13.1**
+- [`VERSION`](VERSION) — **0.15.0**
 - [`CHANGELOG.md`](CHANGELOG.md)
 - Tag `vX.Y.Z` → GitHub Actions builds Linux AppImage + tarball and Windows Setup.exe + ZIP
 
 ```sh
-git tag v0.13.1 && git push origin v0.13.1
+git tag v0.15.0 && git push origin v0.15.0
 ```
 
 ## Credits
