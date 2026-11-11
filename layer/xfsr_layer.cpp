@@ -1170,9 +1170,9 @@ bool setupOffloadPipeline(ProxySwapchain* ps, VkSwapchainKHR oldPresentSwapchain
         uint32_t presentW = ps->displayW, presentH = ps->displayH;
         uint32_t trueW = 0, trueH = 0;
         if (queryTrueSurfaceExtent(dd, ps->surface, &trueW, &trueH)) {
-            if (presentW < trueW || presentH < trueH) {
+            if (presentW != trueW || presentH != trueH) {
                 std::fprintf(stderr,
-                             "[xfsr] bump present extent %ux%u → %ux%u (avoid postage-stamp)\n",
+                             "[xfsr] align present extent %ux%u → %ux%u to match surface\n",
                              presentW, presentH, trueW, trueH);
                 presentW = trueW;
                 presentH = trueH;
@@ -3025,14 +3025,32 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
         }
         logv("[xfsr] in-game/caps supersample proxy: render %ux%u → display %ux%u (scale %.2fx)\n",
              appW, appH, surfW, surfH, dd->inst ? dd->inst->scale : 1.0f);
-    } else if (haveHint && (appW < hintW || appH < hintH) &&
-               (!haveSurf || surfW < hintW || surfH < hintH)) {
-        // Wayland / borderless: seed present size from DISPLAY_EXTENT. Only trust the
-        // hint when the create looks near-fullscreen relative to it — otherwise
+    } else if (haveSurf) {
+        // App requested a swapchain matching the surface extent exactly (e.g. 1920x1080 on 1920x1080 window,
+        // even when monitor/hint is 1920x1200).
+        // Display extent MUST match true surface geometry — never inflate to monitor hint!
+        // Inflating creates an invalid swapchain on X11/surface, causing SUBOPTIMAL/OUT_OF_DATE
+        // on every present and an infinite swapchain recreation storm.
+        ps->displayW = surfW;
+        ps->displayH = surfH;
+        ps->renderW = appW;
+        ps->renderH = appH;
+        if (dd->inst) {
+            dd->inst->realW = surfW;
+            dd->inst->realH = surfH;
+            dd->inst->realFromSurface = true;
+        }
+        if (haveHint && (surfW < hintW || surfH < hintH)) {
+            logv("[xfsr] window %ux%u < display hint %ux%u — presenting at exact surface size\n",
+                 surfW, surfH, hintW, hintH);
+        }
+    } else if (haveHint && (appW < hintW || appH < hintH)) {
+        // Wayland / borderless: seed present size from DISPLAY_EXTENT when compositor reports undefined currentExtent.
+        // Only trust the hint when the create looks near-fullscreen relative to it — otherwise
         // windowed Zink jumps to the monitor size and the image does not fill the
         // actual window (letterbox / postage-stamp).
-        const uint32_t refW = haveSurf && surfW > 0 ? std::max(surfW, appW) : appW;
-        const uint32_t refH = haveSurf && surfH > 0 ? std::max(surfH, appH) : appH;
+        const uint32_t refW = appW;
+        const uint32_t refH = appH;
         uint32_t expectedRw = 0, expectedRh = 0;
         if (dd->inst) computeRenderSize(hintW, hintH, dd->inst->scale, &expectedRw, &expectedRh);
         const bool nearFullscreen = refW >= (hintW * 4u) / 5u && refH >= (hintH * 4u) / 5u;
@@ -3041,7 +3059,7 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
             expectedRw >= 64 && expectedRh >= 64 &&
             std::abs(static_cast<int>(appW) - static_cast<int>(expectedRw)) <= 8 &&
             std::abs(static_cast<int>(appH) - static_cast<int>(expectedRh)) <= 8;
-        if (nearFullscreen || shrunkFullscreen || (!zinkActive() && !haveSurf)) {
+        if (nearFullscreen || shrunkFullscreen || !zinkActive()) {
             ps->displayW = hintW;
             ps->displayH = hintH;
             ps->renderW = appW;
@@ -3056,20 +3074,6 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_CreateSwapchainKHR(VkDevice device,
             }
             logv("[xfsr] in-game/hint proxy: render %ux%u → display hint %ux%u (scale %.2fx)\n",
                  appW, appH, hintW, hintH, dd->inst ? dd->inst->scale : 1.0f);
-        } else if (!zinkActive() && haveSurf) {
-            // X11 window is concretely smaller than the monitor hint (CoD4 creates its
-            // first swapchain before Proton grows the window to fullscreen). A
-            // hint-sized WSI on that window is clipped to the top-left corner and
-            // never fills the screen. Present at the real window size; when the
-            // window grows, the proxy present returns OUT_OF_DATE and we rebuild.
-            ps->renderW = appW;
-            ps->renderH = appH;
-            ps->displayW = surfW;
-            ps->displayH = surfH;
-            std::fprintf(stderr,
-                         "[xfsr] window %ux%u < display hint %ux%u — presenting at window "
-                         "size until it is resized\n",
-                         surfW, surfH, hintW, hintH);
         } else {
             // Windowed Zink with a mismatched monitor hint — recover window from scale.
             ps->renderW = appW;
@@ -3695,6 +3699,21 @@ VKAPI_ATTR void VKAPI_CALL xfsr_SetHdrMetadataEXT(VkDevice device, uint32_t swap
     }
 }
 
+static bool isRecreationStorm() {
+    static std::chrono::steady_clock::time_point s_lastStormTime{};
+    static uint32_t s_stormCount = 0;
+    auto nowTime = std::chrono::steady_clock::now();
+    auto elapsedMs =
+        std::chrono::duration_cast<std::chrono::milliseconds>(nowTime - s_lastStormTime).count();
+    if (elapsedMs < 600) {
+        s_stormCount++;
+    } else {
+        s_stormCount = 0;
+    }
+    s_lastStormTime = nowTime;
+    return s_stormCount > 3;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
                                                     const VkPresentInfoKHR* pPresentInfo) {
     if (!pPresentInfo || pPresentInfo->swapchainCount == 0) {
@@ -4058,6 +4077,18 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
                 uint32_t nowW = 0, nowH = 0;
                 if (!zinkActive() && queryTrueSurfaceExtent(dd, ps->surface, &nowW, &nowH) &&
                     (nowW != ps->displayW || nowH != ps->displayH)) {
+                    if (isRecreationStorm()) {
+                        static bool loggedAcqStorm = false;
+                        if (!loggedAcqStorm) {
+                            loggedAcqStorm = true;
+                            std::fprintf(stderr,
+                                         "[xfsr] recreation storm dampened on acquire (%ux%u ↔ %ux%u) — locking display size\n",
+                                         ps->displayW, ps->displayH, nowW, nowH);
+                        }
+                        ps->displayW = nowW;
+                        ps->displayH = nowH;
+                        return VK_SUCCESS;
+                    }
                     std::fprintf(stderr,
                                  "[xfsr] window resized %ux%u → %ux%u — recreating proxy "
                                  "swapchain\n",
@@ -4453,6 +4484,18 @@ VKAPI_ATTR VkResult VKAPI_CALL xfsr_QueuePresentKHR(VkQueue queue,
             uint32_t nowW = 0, nowH = 0;
             if (!zinkActive() && queryTrueSurfaceExtent(dd, ps->surface, &nowW, &nowH) &&
                 (nowW != ps->displayW || nowH != ps->displayH)) {
+                if (isRecreationStorm()) {
+                    static bool loggedPresStorm = false;
+                    if (!loggedPresStorm) {
+                        loggedPresStorm = true;
+                        std::fprintf(stderr,
+                                     "[xfsr] recreation storm dampened on present (%ux%u ↔ %ux%u) — locking display size\n",
+                                     ps->displayW, ps->displayH, nowW, nowH);
+                    }
+                    ps->displayW = nowW;
+                    ps->displayH = nowH;
+                    return VK_SUCCESS;
+                }
                 std::fprintf(stderr,
                              "[xfsr] window resized %ux%u → %ux%u — recreating proxy swapchain\n",
                              ps->displayW, ps->displayH, nowW, nowH);

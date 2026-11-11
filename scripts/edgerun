@@ -1251,16 +1251,17 @@ if [[ $SKIP_LAYER -eq 0 ]]; then
   export XFSR_OVERLAY="$OVERLAY"
   export XFSR_ADAPTIVE="$ADAPTIVE"
   export XFSR_TARGET_FPS="$TARGET_FPS"
-  if [[ -n "$HOTKEYS" ]]; then
-    export EDGESCALE_HOTKEYS="$HOTKEYS"
-    export XFSR_HOTKEYS="$HOTKEYS"
-    if [[ "$HOTKEYS" == "bare" ]]; then
-      export EDGESCALE_HUD_MOD=0
-      export XFSR_HUD_MOD=0
-    elif [[ "$HOTKEYS" == "shift" ]]; then
-      export EDGESCALE_HUD_MOD=1
-      export XFSR_HUD_MOD=1
-    fi
+  if [[ -z "$HOTKEYS" ]]; then
+    HOTKEYS="shift"
+  fi
+  export EDGESCALE_HOTKEYS="$HOTKEYS"
+  export XFSR_HOTKEYS="$HOTKEYS"
+  if [[ "$HOTKEYS" == "bare" ]]; then
+    export EDGESCALE_HUD_MOD=0
+    export XFSR_HUD_MOD=0
+  else
+    export EDGESCALE_HUD_MOD=1
+    export XFSR_HUD_MOD=1
   fi
   if [[ -n "$SPOOF_VRAM" ]]; then
     export EDGESCALE_SPOOF_VRAM="$SPOOF_VRAM"

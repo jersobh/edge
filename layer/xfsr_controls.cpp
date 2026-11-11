@@ -1932,9 +1932,11 @@ struct TextLayout {
 
 TextLayout computeLayout(const char* text, uint32_t maxWidth, uint32_t maxHeight) {
     TextLayout l{};
-    const int startX = 14;
-    const int scale = 2;
-    const int charW = 8 * scale + 2; // 18px per glyph
+    const int scale = (maxWidth < 900) ? 1 : 2;
+    const int charW = 8 * scale + (scale == 1 ? 1 : 2);
+    const int lineH = 8 * scale + (scale == 1 ? 4 : 6);
+    const int startX = (scale == 1) ? 10 : 14;
+    const int startY = (scale == 1) ? 8 : 10;
     int curX = startX;
     uint32_t curLineW = 0;
     uint32_t maxLineW = 0;
@@ -1962,8 +1964,8 @@ TextLayout computeLayout(const char* text, uint32_t maxWidth, uint32_t maxHeight
     }
     if (curLineW > maxLineW) maxLineW = curLineW;
 
-    l.boxW = std::min(maxWidth, maxLineW + 28u);
-    l.boxH = std::min(maxHeight, physicalLines * 22u + 18u);
+    l.boxW = std::min(maxWidth, maxLineW + static_cast<uint32_t>(startX * 2 + 4));
+    l.boxH = std::min(maxHeight, physicalLines * static_cast<uint32_t>(lineH) + static_cast<uint32_t>(startY * 2 + 8));
     return l;
 }
 
@@ -2025,12 +2027,13 @@ void rasterizeText(uint8_t* pixels, uint32_t width, uint32_t height, const char*
     };
     ColorRgb curColor = kColors[1];
 
-    const int startX = 14;
-    const int startY = 10;
+    const int scale = (maxW < 900) ? 1 : 2;
+    const int charW = 8 * scale + (scale == 1 ? 1 : 2);
+    const int lineH = 8 * scale + (scale == 1 ? 4 : 6);
+    const int startX = (scale == 1) ? 10 : 14;
+    const int startY = (scale == 1) ? 8 : 10;
     int x = startX;
     int y = startY;
-    const int scale = 2;
-    const int charW = 8 * scale + 2;
 
     for (const char* t = text; *t; ++t) {
         char c = *t;
@@ -2041,12 +2044,12 @@ void rasterizeText(uint8_t* pixels, uint32_t width, uint32_t height, const char*
         }
         if (c == '\n') {
             x = startX;
-            y += 8 * scale + 6;
+            y += lineH;
             continue;
         }
         if (x + 8 * scale >= static_cast<int>(maxW)) {
             x = startX;
-            y += 8 * scale + 6;
+            y += lineH;
         }
         if (uc < 32 || uc > 127) c = '?';
         const uint8_t* glyph = kFont8[static_cast<unsigned char>(c) - 32];

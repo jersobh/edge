@@ -6,6 +6,24 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
 
+## [0.15.1] — 2026-11-11
+
+### Fixed
+
+- **Infinite Swapchain Recreation Loop Elimination (16:9 on 16:10 / Resolution Mismatch)**:
+  - Fixed infinite recreation loop where games running at 16:9 (e.g. `1920x1080` in CS2 or CoD4) on 16:10 laptop panels (`1920x1200`) caused hundreds of swapchain rebuilds per second until Steam minidump handlers (`gameoverlayui`) crashed the process.
+  - Enforced concrete surface extent precedence in [`layer/xfsr_layer.cpp`](file:///home/jeff/Projects/crossvulkan/layer/xfsr_layer.cpp): when the window surface is known (`haveSurf`), `displayW/H` strictly adheres to `surfW/H` and never inflates to a larger monitor hint.
+  - Aligned `presentW` and `presentH` to `trueW` and `trueH` inside `setupOffloadPipeline` to ensure WSI swapchains always match physical surface capabilities.
+  - Added `isRecreationStorm()` dampener to both `xfsr_QueuePresentKHR` and `xfsr_AcquireNextImageKHR` to throttle and clamp recreation storms (>3 within 600ms) to the detected extent.
+
+- **HUD Overlay Layout & Visual Improvements**:
+  - Added adaptive text scaling (`scale=1` when width < 900px, `scale=2` otherwise) in `computeLayout()` and `rasterizeText()`.
+  - Added generous bottom padding (`physicalLines * lineH + startY * 2 + 8`) eliminating text descender clipping against the bottom border.
+  - Streamlined overlay status string to prevent awkward mid-token wraps like `(2.0` / `0x)`.
+
+- **Global Hotkey Isolation**:
+  - Ensured `HOTKEYS` defaults to `"shift"` globally across all execution modes in [`scripts/edgerun`](file:///home/jeff/Projects/crossvulkan/scripts/edgerun), so bare keys like `F1` (vote Yes) or `F2` (vote No) in CS2 never conflict.
+
 ## [0.15.0] — 2026-11-10
 
 ### Fixed
