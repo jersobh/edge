@@ -366,6 +366,9 @@ edgerun --layer-dir ./build --check
 | `--no-rcas` | Skip sharpening — usually more FPS |
 | `--offload` / `--no-offload` | dGPU render, iGPU upscale + present (default: `--offload`) |
 | `--one-way` / `--no-one-way` | iGPU present (default with `--offload`) or fused round-trip. One-way skips MangoHud and pins the EdgeScale overlay |
+| `--fan auto\|opt\|balanced\|max\|quiet\|<pct>` | Hardware fan control via `nbfc` EC (auto, dynamic temp-reactive, 75%, 100%, 50%) |
+| `--hotkeys shift\|alt\|ctrl\|ctrl_alt\|nav\|bare\|none` | In-game hotkey modifier mode (default: `shift` to prevent in-game vote clashing) |
+| `--no-hotkeys` | Disable keyboard hotkey listeners completely (safest for competitive esports) |
 | `--mangohud` | FPS overlay. Not loaded on one-way; use the EdgeScale overlay instead |
 | `--controls` / `--no-controls` | In-game hotkeys + status toast (default on) |
 | `--overlay` | Pin the status strip at launch (`EDGESCALE_OVERLAY=1`; Proton/Steam often eat F10) |
@@ -399,26 +402,30 @@ edgerun --layer-dir ./build --check
 
 ### In-game controls (default on)
 
-| Key | Action |
-|-----|--------|
-| **F1** | Cycle preset (**live** via swapchain recreate when the title handles `OUT_OF_DATE`) |
-| **F2** | Toggle sharpening (**live**); on `edge`, cycles `quality` ↔ `perf` ↔ `nearest` (pixel art) |
-| **F3** | Cycle upscaler `edge` → `fsr1` → `blit` → `nearest` → `nis` (**live** when passes exist) |
-| **F4** | Toggle offload same-GPU ↔ round-trip (**live**; brief hitch) |
-| **F5** | Toggle one-way preference (**restart** to move WSI) |
-| **F10** | Pin / unpin the status overlay (**live**) |
+To prevent games from misinterpreting in-game hotkeys (e.g. voting `F1`/`F2` or autobuy `F3` in *Counter-Strike 2*), EdgeScale defaults to **`Shift+F*`** hotkeys. You can also select the navigation cluster (`--hotkeys nav`) or disable hotkeys (`--no-hotkeys`).
 
-A toast appears for a few seconds after each change (and stays if pinned). Keys are read via X11, Win32 `GetAsyncKeyState`, and/or `/dev/input` (evdev). Set `EDGESCALE_HUD_MOD=1` if you want **Shift+F*** to avoid clashing with game binds. For Proton titles where F10 does nothing, launch with `--overlay` or use the control file:
+| Shift Combo | Nav Cluster | Action |
+|-------------|-------------|--------|
+| **Shift+F1** | **Insert** | Cycle preset (**live** via swapchain recreate when the title handles `OUT_OF_DATE`) |
+| **Shift+F2** | **Home** | Toggle mode (**live**); on `edge`, cycles `quality` ↔ `perf` ↔ `nearest` ↔ `competitive` |
+| **Shift+F3** | **PageUp** | Cycle upscaler `edge` → `fsr1` → `blit` → `nearest` → `nis` (**live**) |
+| **Shift+F4** | **Delete** | Toggle offload same-GPU ↔ round-trip (**live**; brief hitch) |
+| **Shift+F5** | **End** | Toggle one-way preference (**restart** to move WSI) |
+| **Shift+F6** | **PageDown** | Cycle fan control (**live**): `AUTO` ↔ `AUTO-OPT` ↔ `BALANCED (75%)` ↔ `MAX (100%)` ↔ `QUIET (50%)` |
+| **Shift+F10** | **Pause** | Pin / unpin the status overlay (**live**) |
+
+A toast appears for a few seconds after each change (and stays if pinned). Keys are read via X11, Win32 `GetAsyncKeyState`, and/or `/dev/input` (evdev). Configure with `--hotkeys <shift|alt|ctrl|ctrl_alt|nav|bare|none>` or `--no-hotkeys`. For Proton titles where F10 does nothing, launch with `--overlay` or use the control file:
 
 ```sh
 echo overlay 1 > "$XDG_RUNTIME_DIR/edgescale-control"
 echo preset ultra > "$XDG_RUNTIME_DIR/edgescale-control"
 echo edge_mode nearest > "$XDG_RUNTIME_DIR/edgescale-control"
+echo hotkeys nav > "$XDG_RUNTIME_DIR/edgescale-control"
 ```
 *(Legacy `$XDG_RUNTIME_DIR/xfsr-control` remains symlinked and fully functional).*
 
-Commands: `preset …`, `cycle_preset`, `rcas 0|1`, `edge_sharp 0..1`, `edge_mode quality|perf|nearest`,
-`fsr 0|1`, `upscaler …`, `offload 0|1`, `one-way 0|1`, `overlay 0|1`, `status`.
+Commands: `preset …`, `cycle_preset`, `rcas 0|1`, `edge_sharp 0..1`, `edge_mode quality|perf|nearest|competitive`,
+`fsr 0|1`, `upscaler …`, `offload 0|1`, `one-way 0|1`, `fan auto|opt|balanced|max|quiet|<pct>`, `hotkeys shift|alt|ctrl|nav|bare|none`, `overlay 0|1`, `status`.
 `offload` applies live (round-trip); `one-way` needs a restart.
 
 **Exclusive fullscreen / D3D9 / CS2:** Many titles create a full-desktop swapchain and

@@ -263,6 +263,36 @@ vec3 edgeDownsample(vec2 uv, vec2 renderSize, float sharp) {
     return beautifyColor(avg);
 }
 
+// Fast 1:1 Native Resolution Pass with Contrast-Adaptive Sharpening:
+// Used when renderSize == displaySize (no spatial scaling needed).
+// Samples center pixel and runs a 5-tap cross CAS filter for crisp detail.
+vec3 edgeNative(vec2 uv, vec2 renderSize, float sharp) {
+    vec3 c = sampleLod(uv);
+    if (sharp <= 0.01) return beautifyColor(c);
+
+    vec2 texel = 1.0 / renderSize;
+    vec3 north = sampleLod(uv + vec2(0.0, -texel.y));
+    vec3 south = sampleLod(uv + vec2(0.0,  texel.y));
+    vec3 west  = sampleLod(uv + vec2(-texel.x, 0.0));
+    vec3 east  = sampleLod(uv + vec2( texel.x, 0.0));
+
+    vec3 minC = min(c, min(min(north, south), min(west, east)));
+    vec3 maxC = max(c, max(max(north, south), max(west, east)));
+
+    float lMin = luma(minC);
+    float lMax = luma(maxC);
+    float contrast = lMax - lMin;
+
+    if (contrast > 0.01) {
+        float casAmp = clamp(min(lMin, 1.0 - lMax) / max(contrast, 1e-4), 0.0, 1.0);
+        vec3 crossAvg = (north + south + west + east) * 0.25;
+        vec3 highPass = c - crossAvg;
+        float effectiveSharp = sharp * mix(0.40, 0.80, casAmp);
+        c = clamp(c + highPass * effectiveSharp, minC, maxC);
+    }
+    return beautifyColor(c);
+}
+
 void main() {
     ivec2 dst = ivec2(gl_GlobalInvocationID.xy);
     int dw = int(u.sizes.z + 0.5);
@@ -279,7 +309,10 @@ void main() {
 
     vec2 uv = (vec2(dst) + 0.5) / displaySize;
     vec3 rgb;
-    if (renderSize.x > displaySize.x * 1.01) {
+    if (abs(renderSize.x - displaySize.x) <= 1.0 && abs(renderSize.y - displaySize.y) <= 1.0) {
+        // Native 1:1 resolution: bypass heavy multi-tap scaling filters
+        rgb = (mode == 2) ? sampleLod(uv) : edgeNative(uv, renderSize, sharp);
+    } else if (renderSize.x > displaySize.x * 1.01) {
         // Render size is larger than display size: downsample / supersample (e.g. 4K -> 1080p SSAA)
         rgb = edgeDownsample(uv, renderSize, sharp);
     } else if (mode == 3) {

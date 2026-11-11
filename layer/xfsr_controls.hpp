@@ -11,6 +11,20 @@
 namespace xfsr_ctrl {
 
 enum class Upscaler : uint8_t { Blit = 0, Fsr1 = 1, Nis = 2, Edge = 3, Nearest = 4 };
+enum class FanMode : uint8_t { Auto = 0, AutoOpt = 1, Balanced = 2, Max = 3, Quiet = 4, Custom = 5 };
+enum class HotkeyMode : uint8_t {
+    Shift = 0,   // Shift+F1..F6, Shift+F10 (safe default, no in-game F1/F2 conflict)
+    Alt = 1,     // Alt+F1..F6, Alt+F10
+    Ctrl = 2,    // Ctrl+F1..F6, Ctrl+F10
+    CtrlAlt = 3, // Ctrl+Alt+F1..F6, Ctrl+Alt+F10
+    Nav = 4,     // Insert/Home/PgUp/Del/End/PgDn/Pause (no F-keys used at all)
+    Bare = 5,    // Bare F1..F6, F10 (legacy opt-in)
+    None = 6     // Disabled
+};
+
+const char* fanModeName(FanMode mode);
+const char* hotkeyModeName(HotkeyMode mode);
+const char* hotkeyModeDescription(HotkeyMode mode);
 
 struct Snapshot {
     float scale = 1.5f;
@@ -21,6 +35,9 @@ struct Snapshot {
     float edgeSharpness = 0.60f; // 0..1 — EdgePass CAS strength
     bool edgePerf = false;       // EdgePass cheap path (edge-lite)
     int edgeMode = 0;            // 0 = quality, 1 = perf, 2 = nearest, 3 = competitive
+    FanMode fanMode = FanMode::Auto;
+    int fanPct = -1;             // -1: auto, 0..100: speed percentage
+    int cpuTempC = -1;           // CPU temp in Celsius
     bool offload = false;     // dual-GPU
     bool oneWay = true;       // prefer iGPU present when offload
     bool oneWayForce = false; // XFSR_IGPU_PRESENT=force (NVIDIA)
@@ -66,6 +83,9 @@ void clearReconfigureOffload();
 // Clear retryOffload after the layer applied it.
 void clearRetryOffload();
 
+// Set active fan mode and optional target percentage (-1 for auto/default)
+void setFanMode(FanMode mode, int customPct = -1);
+
 // Force a toast (e.g. after apply).
 void showToast(const char* msg);
 
@@ -78,6 +98,7 @@ struct OverlayGpu {
     void* stagingMapped = nullptr;
     uint32_t width = 0;
     uint32_t height = 0;
+    uint32_t lastWrapW = 0;
     char lastText[384]{};
 };
 

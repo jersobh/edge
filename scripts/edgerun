@@ -83,8 +83,12 @@ ADAPTIVE="${EDGESCALE_ADAPTIVE:-${EDGE_ADAPTIVE:-${XFSR_ADAPTIVE:-0}}}"
 ADAPTIVE_CLI=0
 TARGET_FPS="${EDGESCALE_TARGET_FPS:-${EDGE_TARGET_FPS:-${XFSR_TARGET_FPS:-60}}}"
 TARGET_FPS_CLI=0
+HOTKEYS="${EDGESCALE_HOTKEYS:-${EDGE_HOTKEYS:-${XFSR_HOTKEYS:-}}}"
+HOTKEYS_CLI=0
 SPOOF_VRAM="${EDGESCALE_SPOOF_VRAM:-${XFSR_SPOOF_VRAM:-}}"
 SPOOF_VRAM_CLI=0
+FAN="${EDGESCALE_FAN:-${EDGE_FAN:-${XFSR_FAN:-}}}"
+FAN_CLI=0
 DSR_CLI=0
 AI_MODE=0
 PROFILE_NOTE=""
@@ -128,9 +132,14 @@ Options:
   --native                                Passthrough mode (no upscaling/proxy)
   --offload / --no-offload                Toggle dual-GPU offload (default: on)
   --one-way / --no-one-way                Toggle direct one-way iGPU presentation vs round-trip
+  --fan auto|opt|balanced|max|quiet|<pct> Fan control via nbfc (auto=EC, opt=dynamic, max=100%, balanced=75%, quiet=50%)
   --rcas / --no-rcas                      FSR1 RCAS sharpening pass (default: on)
   --controls / --no-controls              In-game hotkeys & overlay (default: on)
-                                          F1 preset, F2 mode/RCAS, F3 upscaler, F4 offload, F5 one-way, F10 pin
+                                          F1 preset, F2 mode/RCAS, F3 upscaler, F4 offload, F5 one-way, F6 fan, F10 pin
+  --hotkeys shift|alt|ctrl|ctrl_alt|nav|bare|none
+                                          Hotkey modifier/mapping (default: shift = Shift+F1..F6, safe against in-game votes;
+                                          nav = Insert/Home/PgUp/Del/End/PgDn; none = disable hotkeys)
+  --no-hotkeys                            Disable in-game keyboard hotkeys completely
   --overlay / --no-overlay                Pin HUD status strip (default: on when MangoHud is off)
   --lod-bias auto|off|<float>             Negative mip LOD bias on samplers (default: auto = -log2(scale))
   --lod-bias-offset <float>               Tweak offset for LOD bias (e.g. -0.5)
@@ -557,8 +566,13 @@ while [[ $# -gt 0 ]]; do
       EDGE_MODE="competitive"
       EDGE_MODE_CLI=1
       if [[ $UPSCALER_CLI -eq 0 ]]; then UPSCALER=edge; UPSCALER_CLI=1; FSR=1; FSR_CLI=1; NATIVE=0; fi
+      if [[ $FAN_CLI -eq 0 && -z "$FAN" ]]; then FAN="opt"; fi
       shift
       ;;
+    --fan|--fan-mode)
+      FAN="${2:?}"; FAN_CLI=1; shift 2 ;;
+    --fan=*|--fan-mode=*)
+      FAN="${1#*=}"; FAN_CLI=1; shift ;;
     --edge-sharpness|--edge-sharp)
       EDGE_SHARP="${2:?}"; EDGE_SHARP_CLI=1; shift 2
       if [[ $UPSCALER_CLI -eq 0 ]]; then UPSCALER=edge; UPSCALER_CLI=1; FSR=1; FSR_CLI=1; NATIVE=0; fi
@@ -577,6 +591,12 @@ while [[ $# -gt 0 ]]; do
       LOD_BIAS_OFFSET="${1#*=}"; LOD_BIAS_OFFSET_CLI=1; shift ;;
     --controls) HUD=1; shift ;;
     --no-controls) HUD=0; shift ;;
+    --hotkeys)
+      HOTKEYS="${2:?}"; HOTKEYS_CLI=1; shift 2 ;;
+    --hotkeys=*)
+      HOTKEYS="${1#*=}"; HOTKEYS_CLI=1; shift ;;
+    --no-hotkeys)
+      HOTKEYS="none"; HOTKEYS_CLI=1; shift ;;
     --overlay) OVERLAY=1; OVERLAY_CLI=1; shift ;;
     --no-overlay) OVERLAY=0; OVERLAY_CLI=1; shift ;;
     --caps-shrink) CAPS_SHRINK=1; CAPS_SHRINK_CLI=1; shift ;;
@@ -1231,6 +1251,17 @@ if [[ $SKIP_LAYER -eq 0 ]]; then
   export XFSR_OVERLAY="$OVERLAY"
   export XFSR_ADAPTIVE="$ADAPTIVE"
   export XFSR_TARGET_FPS="$TARGET_FPS"
+  if [[ -n "$HOTKEYS" ]]; then
+    export EDGESCALE_HOTKEYS="$HOTKEYS"
+    export XFSR_HOTKEYS="$HOTKEYS"
+    if [[ "$HOTKEYS" == "bare" ]]; then
+      export EDGESCALE_HUD_MOD=0
+      export XFSR_HUD_MOD=0
+    elif [[ "$HOTKEYS" == "shift" ]]; then
+      export EDGESCALE_HUD_MOD=1
+      export XFSR_HUD_MOD=1
+    fi
+  fi
   if [[ -n "$SPOOF_VRAM" ]]; then
     export EDGESCALE_SPOOF_VRAM="$SPOOF_VRAM"
     export XFSR_SPOOF_VRAM="$SPOOF_VRAM"
@@ -1319,6 +1350,27 @@ if [[ -z "${XFSR_LAYER_FSR:-}" ]]; then
   export XFSR_LAYER_FSR="$FSR"
 fi
 
+_fan_msg=""
+if [[ -n "$FAN" ]]; then
+  export EDGESCALE_FAN="$FAN"
+  export XFSR_FAN="$FAN"
+  _fan_msg=" fan=$FAN"
+  if command -v nbfc >/dev/null 2>&1; then
+    case "$FAN" in
+      max|100) ( nbfc set -f 0 -s 100 >/dev/null 2>&1 && nbfc set -f 1 -s 100 >/dev/null 2>&1 ) & ;;
+      balanced|75) ( nbfc set -f 0 -s 75 >/dev/null 2>&1 && nbfc set -f 1 -s 75 >/dev/null 2>&1 ) & ;;
+      quiet|50) ( nbfc set -f 0 -s 50 >/dev/null 2>&1 && nbfc set -f 1 -s 50 >/dev/null 2>&1 ) & ;;
+      auto|ec) ( nbfc set -f 0 -a >/dev/null 2>&1 && nbfc set -f 1 -a >/dev/null 2>&1 ) & ;;
+      opt|auto-opt) : ;;
+      *)
+        if [[ "$FAN" =~ ^[0-9]+$ ]] && (( FAN >= 10 && FAN <= 100 )); then
+          ( nbfc set -f 0 -s "$FAN" >/dev/null 2>&1 && nbfc set -f 1 -s "$FAN" >/dev/null 2>&1 ) &
+        fi
+        ;;
+    esac
+  fi
+fi
+
 _ow_msg=""
 if [[ -n "${XFSR_IGPU_PRESENT:-}" ]]; then
   if [[ "$XFSR_IGPU_PRESENT" == "1" ]]; then _ow_msg=" one-way=1"; else _ow_msg=" one-way=0"; fi
@@ -1344,11 +1396,11 @@ _sv=""
 _gs=""
 [[ $USE_GAMESCOPE -eq 1 ]] && _gs=" gamescope=${RENDER_W}x${RENDER_H}→${OUT_W}x${OUT_H}"
 if [[ $SKIP_LAYER -eq 1 ]]; then
-  echo "edgerun: gamescope path (no Vulkan layer) preset=$PRESET scale=$SCALE mode=$_mode${_sv}${_gs}" >&2
+  echo "edgerun: gamescope path (no Vulkan layer) preset=$PRESET scale=$SCALE mode=$_mode${_sv}${_gs}${_fan_msg}" >&2
 else
-  echo "edgerun: layer ${LAYER_DIR} (ENABLE_XFSR=1 preset=$PRESET scale=$SCALE mode=$_mode offload=$OFFLOAD${_ow_msg}${_hy}${_sv}${_gs})" >&2
+  echo "edgerun: layer ${LAYER_DIR} (ENABLE_XFSR=1 preset=$PRESET scale=$SCALE mode=$_mode offload=$OFFLOAD${_ow_msg}${_hy}${_sv}${_gs}${_fan_msg})" >&2
 fi
-unset _ow_msg _mode _hy _sv _gs
+unset _ow_msg _mode _hy _sv _gs _fan_msg
 if [[ $OFFLOAD -eq 1 && $PREFER_DGPU -eq 0 ]]; then
   echo "xfsr-run: warning: --igpu + --offload — app on integrated GPU; layer will skip dual-GPU and use same-GPU FSR. Drop --igpu for dGPU render → iGPU FSR." >&2
 fi
@@ -1534,6 +1586,14 @@ if [[ $COMPETITIVE -eq 1 ]]; then
   export XFSR_LOW_LATENCY=1
   export EDGESCALE_EDGE_MODE="competitive"
   export XFSR_EDGE_MODE="competitive"
+  # In competitive mode, prevent in-game vote/rebuy key conflicts (bare F1/F2/F3): default to shift modifier
+  if [[ $HOTKEYS_CLI -eq 0 && -z "${HOTKEYS:-}" ]]; then
+    HOTKEYS="shift"
+    export EDGESCALE_HOTKEYS="shift"
+    export XFSR_HOTKEYS="shift"
+    export EDGESCALE_HUD_MOD=1
+    export XFSR_HUD_MOD=1
+  fi
   # Low-latency DXVK tuning: zero sync interval, async pipeline compile, minimal frame queuing
   _comp_dxvk="dxvk.syncInterval = 0; dxvk.numBackBuffers = 1"
   [[ "${DXVK_CONFIG:-}" != *syncInterval* ]] && DXVK_CONFIG="${_comp_dxvk}${DXVK_CONFIG:+; $DXVK_CONFIG}"
@@ -1582,6 +1642,9 @@ XFSR_RCAS=${XFSR_RCAS:-}
 XFSR_EDGE_MODE=${XFSR_EDGE_MODE:-}
 XFSR_EDGE_SHARPNESS=${XFSR_EDGE_SHARPNESS:-}
 XFSR_CAPS_SHRINK=${XFSR_CAPS_SHRINK:-}
+XFSR_HUD=${XFSR_HUD:-}
+EDGESCALE_HOTKEYS=${EDGESCALE_HOTKEYS:-}
+EDGESCALE_HUD_MOD=${EDGESCALE_HUD_MOD:-}
 XFSR_OVERLAY=${XFSR_OVERLAY:-}
 XFSR_ADAPTIVE=${XFSR_ADAPTIVE:-}
 XFSR_TARGET_FPS=${XFSR_TARGET_FPS:-}

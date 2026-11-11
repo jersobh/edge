@@ -17,6 +17,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -24,6 +25,7 @@
 #include <mutex>
 #include <string>
 #include <sys/stat.h>
+#include <thread>
 #include <vector>
 
 namespace xfsr_ctrl {
@@ -147,20 +149,33 @@ constexpr unsigned long kXK_F2 = 0xffbf;
 constexpr unsigned long kXK_F3 = 0xffc0;
 constexpr unsigned long kXK_F4 = 0xffc1;
 constexpr unsigned long kXK_F5 = 0xffc2;
+constexpr unsigned long kXK_F6 = 0xffc3;
 constexpr unsigned long kXK_F10 = 0xffc7;
 constexpr unsigned long kXK_Shift_L = 0xffe1;
 constexpr unsigned long kXK_Shift_R = 0xffe2;
+constexpr unsigned long kXK_Control_L = 0xffe3;
+constexpr unsigned long kXK_Control_R = 0xffe4;
+constexpr unsigned long kXK_Alt_L = 0xffe9;
+constexpr unsigned long kXK_Alt_R = 0xffea;
+constexpr unsigned long kXK_Insert = 0xff63;
+constexpr unsigned long kXK_Delete = 0xffff;
+constexpr unsigned long kXK_Home = 0xff50;
+constexpr unsigned long kXK_End = 0xff57;
+constexpr unsigned long kXK_Page_Up = 0xff55;
+constexpr unsigned long kXK_Page_Down = 0xff56;
+constexpr unsigned long kXK_Pause = 0xff13;
 
 struct KeyBits {
-    bool f1 = false, f2 = false, f3 = false, f4 = false, f5 = false, f10 = false;
-    bool shift = false;
+    bool f1 = false, f2 = false, f3 = false, f4 = false, f5 = false, f6 = false, f10 = false;
+    bool ins = false, del = false, home = false, end = false, pgup = false, pgdn = false, pause = false;
+    bool shift = false, ctrl = false, alt = false;
 };
 
 struct Runtime {
     std::mutex mu;
     bool inited = false;
     bool hudOn = true;
-    bool requireMod = false; // XFSR_HUD_MOD=1 → need Shift+F*
+    HotkeyMode hotkeyMode = HotkeyMode::Shift; // Safe default: Shift+F* (no in-game F1/F2 conflict)
     int presetIdx = 0;
     float scale = 1.5f;
     bool rcas = true;
@@ -168,6 +183,9 @@ struct Runtime {
     float edgeSharpness = 0.60f;
     bool edgePerf = false;
     int edgeMode = 0; // 0=quality, 1=perf, 2=nearest
+    FanMode fanMode = FanMode::Auto;
+    int fanPct = -1; // -1 for auto, 0..100 for fixed/custom
+    std::chrono::steady_clock::time_point lastAutoOptChange{};
     bool offload = false;
     bool oneWay = true;
     bool oneWayForce = false;
@@ -251,8 +269,11 @@ struct X11 {
     XCloseDisplay_fn CloseDisplay = nullptr;
     XQueryKeymap_fn QueryKeymap = nullptr;
     XKeysymToKeycode_fn KeysymToKeycode = nullptr;
-    unsigned char kcF1 = 0, kcF2 = 0, kcF3 = 0, kcF4 = 0, kcF5 = 0, kcF10 = 0;
+    unsigned char kcF1 = 0, kcF2 = 0, kcF3 = 0, kcF4 = 0, kcF5 = 0, kcF6 = 0, kcF10 = 0;
     unsigned char kcShiftL = 0, kcShiftR = 0;
+    unsigned char kcCtrlL = 0, kcCtrlR = 0;
+    unsigned char kcAltL = 0, kcAltR = 0;
+    unsigned char kcIns = 0, kcDel = 0, kcHome = 0, kcEnd = 0, kcPgUp = 0, kcPgDn = 0, kcPause = 0;
     bool ready = false;
     bool gaveUp = false;
     int failTries = 0;
@@ -296,9 +317,109 @@ int presetIndexFromScale(float s) {
     return best;
 }
 
+void trimInPlace(char* s) {
+    if (!s) return;
+    char* a = s;
+    while (*a == ' ' || *a == '\t' || *a == '\r' || *a == '\n') ++a;
+    if (a != s) std::memmove(s, a, std::strlen(a) + 1);
+    size_t n = std::strlen(s);
+    while (n > 0 && (s[n - 1] == ' ' || s[n - 1] == '\t' || s[n - 1] == '\r' || s[n - 1] == '\n')) {
+        s[--n] = '\0';
+    }
+}
+
+struct FanWorker {
+    std::mutex mu;
+    std::condition_variable cv;
+    bool hasNbfc = false;
+    bool probed = false;
+    bool running = false;
+    bool stop = false;
+    bool dirty = false;
+    int targetPct = -1; // -1: auto, 0..100: percentage
+    int lastAppliedPct = -999;
+    std::thread worker;
+
+    void probe() {
+        if (probed) return;
+        probed = true;
+#if !defined(_WIN32)
+        hasNbfc = (::access("/usr/bin/nbfc", X_OK) == 0);
+        if (!hasNbfc) {
+            FILE* p = ::popen("which nbfc 2>/dev/null", "r");
+            if (p) {
+                char buf[128]{};
+                if (std::fgets(buf, sizeof(buf), p)) {
+                    trimInPlace(buf);
+                    if (buf[0]) hasNbfc = true;
+                }
+                ::pclose(p);
+            }
+        }
+#endif
+        if (hasNbfc && !running) {
+            running = true;
+            worker = std::thread([this]() {
+                std::unique_lock<std::mutex> lock(mu);
+                while (!stop) {
+                    cv.wait(lock, [this]() { return stop || dirty; });
+                    if (stop) break;
+                    dirty = false;
+                    const int pct = targetPct;
+                    lock.unlock();
+
+                    if (pct != lastAppliedPct) {
+                        lastAppliedPct = pct;
+                        char cmd[160]{};
+                        if (pct < 0) {
+                            std::snprintf(cmd, sizeof(cmd),
+                                          "nbfc set -f 0 -a >/dev/null 2>&1 && nbfc set -f 1 -a >/dev/null 2>&1");
+                        } else {
+                            const int speed = std::clamp(pct, 10, 100);
+                            std::snprintf(cmd, sizeof(cmd),
+                                          "nbfc set -f 0 -s %d >/dev/null 2>&1 && nbfc set -f 1 -s %d >/dev/null 2>&1",
+                                          speed, speed);
+                        }
+                        ::system(cmd);
+                    }
+
+                    lock.lock();
+                }
+            });
+        }
+    }
+
+    void apply(int pct) {
+        if (!probed) probe();
+        if (!hasNbfc) return;
+        std::lock_guard<std::mutex> lock(mu);
+        targetPct = pct;
+        dirty = true;
+        cv.notify_one();
+    }
+
+    void shutdown() {
+        if (!running) return;
+        {
+            std::lock_guard<std::mutex> lock(mu);
+            stop = true;
+            dirty = true;
+            cv.notify_one();
+        }
+        if (worker.joinable()) worker.join();
+        running = false;
+    }
+
+    ~FanWorker() {
+        shutdown();
+    }
+};
+
+static FanWorker g_fanWorker;
+
 struct GpuMetric {
     char tag[16] = "";     // "dGPU" or "iGPU"
-    char name[48] = "";    // "GeForce GTX 1650" or "Radeon Vega 10"
+    char name[64] = "";    // "GeForce GTX 1650" or "Radeon Vega 10"
     int loadPct = -1;
     int tempC = -1;
     int vramUsedMb = -1;
@@ -311,6 +432,8 @@ struct GpuMetric {
 struct HudMetrics {
     double fps = 0;
     int cpu = -1;
+    int cpuTempC = -1;
+    char cpuTempPath[384]{};
     GpuMetric gpus[2];
     int gpuN = 0;
 };
@@ -536,6 +659,45 @@ int sampleCpuPercent() {
 #endif
 }
 
+void discoverCpuTemp() {
+#if !defined(_WIN32)
+    if (g_metrics.cpuTempPath[0]) return;
+    DIR* dir = opendir("/sys/class/hwmon");
+    if (!dir) return;
+
+    char fallbackPath[384]{};
+    while (dirent* ent = readdir(dir)) {
+        if (std::strncmp(ent->d_name, "hwmon", 5) != 0) continue;
+        char namePath[384];
+        std::snprintf(namePath, sizeof(namePath), "/sys/class/hwmon/%s/name", ent->d_name);
+        FILE* nf = std::fopen(namePath, "r");
+        if (!nf) continue;
+        char drvName[64]{};
+        if (std::fscanf(nf, "%63s", drvName) != 1) drvName[0] = '\0';
+        std::fclose(nf);
+
+        char temp1[384];
+        std::snprintf(temp1, sizeof(temp1), "/sys/class/hwmon/%s/temp1_input", ent->d_name);
+        if (::access(temp1, R_OK) == 0) {
+            if (fallbackPath[0] == '\0') {
+                std::snprintf(fallbackPath, sizeof(fallbackPath), "%s", temp1);
+            }
+            if (std::strstr(drvName, "k10temp") || std::strstr(drvName, "coretemp") ||
+                std::strstr(drvName, "zenpower") || std::strstr(drvName, "cpu_thermal") ||
+                std::strstr(drvName, "soc_thermal")) {
+                std::snprintf(g_metrics.cpuTempPath, sizeof(g_metrics.cpuTempPath), "%s", temp1);
+                break;
+            }
+        }
+    }
+    closedir(dir);
+
+    if (g_metrics.cpuTempPath[0] == '\0' && fallbackPath[0] != '\0') {
+        std::snprintf(g_metrics.cpuTempPath, sizeof(g_metrics.cpuTempPath), "%s", fallbackPath);
+    }
+#endif
+}
+
 void sampleMetricsLocked() {
     const auto now = std::chrono::steady_clock::now();
     if (!g_metricInited) {
@@ -543,6 +705,7 @@ void sampleMetricsLocked() {
         g_metricAt = now;
         g_presentMark = g_presentFrames.load(std::memory_order_relaxed);
         discoverGpus();
+        discoverCpuTemp();
         return;
     }
     const double dt = std::chrono::duration<double>(now - g_metricAt).count();
@@ -552,6 +715,12 @@ void sampleMetricsLocked() {
     g_presentMark = frames;
     g_metricAt = now;
     g_metrics.cpu = sampleCpuPercent();
+
+    discoverCpuTemp();
+    if (g_metrics.cpuTempPath[0]) {
+        const int milli = readSysInt(g_metrics.cpuTempPath);
+        if (milli > 0) g_metrics.cpuTempC = milli / 1000;
+    }
 
 #if !defined(_WIN32)
     for (int i = 0; i < g_metrics.gpuN; ++i) {
@@ -574,12 +743,84 @@ void sampleMetricsLocked() {
         }
     }
 #endif
+
+    // Auto-Optimized fan control: react to peak temperature across CPU and all GPUs
+    if (g_rt.fanMode == FanMode::AutoOpt && g_fanWorker.hasNbfc) {
+        int maxTemp = g_metrics.cpuTempC;
+        for (int i = 0; i < g_metrics.gpuN; ++i) {
+            if (g_metrics.gpus[i].tempC > maxTemp) maxTemp = g_metrics.gpus[i].tempC;
+        }
+        int target = -1;
+        if (maxTemp >= 78) target = 100;
+        else if (maxTemp >= 70) target = 85;
+        else if (maxTemp >= 62) target = 70;
+        else if (maxTemp > 0) target = 50;
+
+        const auto elapsedSec =
+            std::chrono::duration_cast<std::chrono::seconds>(now - g_rt.lastAutoOptChange).count();
+        if (target > 0 && (target != g_rt.fanPct) && (elapsedSec >= 5 || maxTemp >= 78)) {
+            g_rt.lastAutoOptChange = now;
+            g_rt.fanPct = target;
+            g_fanWorker.apply(target);
+        }
+    }
+}
+
+void cleanGpuName(char* out, size_t outSize, const char* in) {
+    if (!out || outSize == 0) return;
+    out[0] = '\0';
+    if (!in || !in[0]) return;
+
+    const char* p = in;
+    const char* prefixes[] = {
+        "NVIDIA GeForce ", "NVIDIA ", "GeForce ",
+        "AMD Radeon(TM) ", "AMD Radeon ", "AMD ",
+        "Intel(R) ", "Intel "
+    };
+    for (const char* pre : prefixes) {
+        const size_t len = std::strlen(pre);
+        if (std::strncmp(p, pre, len) == 0) {
+            p += len;
+            break;
+        }
+    }
+
+    char buf[128];
+    std::snprintf(buf, sizeof(buf), "%s", p);
+
+    // Strip bracket/paren driver details like (RADV RAVEN) or (ACO)
+    char* paren = std::strchr(buf, '(');
+    if (paren) {
+        if (paren > buf && *(paren - 1) == ' ') *(paren - 1) = '\0';
+        else *paren = '\0';
+    }
+
+    const char* suffixes[] = {
+        "with Max-Q Design", "Laptop GPU", "Graphics", "Mobile"
+    };
+    for (const char* suf : suffixes) {
+        char* loc = std::strstr(buf, suf);
+        if (loc) {
+            const size_t slen = std::strlen(suf);
+            std::memmove(loc, loc + slen, std::strlen(loc + slen) + 1);
+        }
+    }
+    trimInPlace(buf);
+    const char* chosen = buf[0] ? buf : p;
+    std::snprintf(out, outSize, "%.*s", static_cast<int>(outSize - 1), chosen);
 }
 
 void formatStatusLocked(char* out, size_t n) {
     sampleMetricsLocked();
     char cpu[16] = "--";
     if (g_metrics.cpu >= 0) std::snprintf(cpu, sizeof(cpu), "%d%%", g_metrics.cpu);
+
+    auto tempColor = [](int tempC) -> const char* {
+        if (tempC <= 0) return "\006"; // muted
+        if (tempC < 65) return "\003"; // green
+        if (tempC < 76) return "\004"; // amber
+        return "\005";                 // red
+    };
 
     // --- Line 1: Mode, Upscaler, and Resolutions ---
     const bool isPassthrough =
@@ -590,24 +831,24 @@ void formatStatusLocked(char* out, size_t n) {
     if (std::strcmp(g_rt.presentMode, "gamescope") == 0) {
         modeLabel = "GAMESCOPE";
     } else if (!g_rt.hasIgpu && !g_rt.dgpuIsDiscrete) {
-        modeLabel = isPassthrough ? "PASSTHROUGH (iGPU)" : "SAME-GPU (iGPU)";
+        modeLabel = isPassthrough ? "PASSTHROUGH" : "SAME-GPU";
     } else if (g_rt.offload && (g_rt.hasIgpu || !g_rt.hasDgpu)) {
         if (g_rt.oneWay) {
-            modeLabel = (g_rt.upscaler == Upscaler::Edge) ? "HYBRID (dGPU->iGPU)" : "OFFLOAD (1-way)";
+            modeLabel = (g_rt.upscaler == Upscaler::Edge) ? "HYBRID" : "OFFLOAD 1-WAY";
         } else {
-            modeLabel = "OFFLOAD (round-trip)";
+            modeLabel = "OFFLOAD 2-WAY";
         }
     } else if (g_rt.lastRenderW == 3840 && g_rt.lastDisplayW == 1920) {
-        modeLabel = "DSR 4K (SSAA)";
+        modeLabel = "DSR 4K";
     } else if (isPassthrough) {
         modeLabel = "PASSTHROUGH";
     }
 
     char upscalerBuf[64] = "";
     if (g_rt.upscaler == Upscaler::Edge) {
-        const char* em = (g_rt.edgeMode == 3) ? "competitive" :
-                         ((g_rt.edgeMode == 2) ? "nearest" : (g_rt.edgePerf ? "perf" : "quality"));
-        std::snprintf(upscalerBuf, sizeof(upscalerBuf), "edge (%s, CAS:%.2f)", em, g_rt.edgeSharpness);
+        const char* em = (g_rt.edgeMode == 3) ? "comp" :
+                         ((g_rt.edgeMode == 2) ? "nn" : (g_rt.edgePerf ? "perf" : "qual"));
+        std::snprintf(upscalerBuf, sizeof(upscalerBuf), "edge:%s (CAS:%.2f)", em, g_rt.edgeSharpness);
     } else if (g_rt.upscaler == Upscaler::Nis) {
         std::snprintf(upscalerBuf, sizeof(upscalerBuf), "NIS");
     } else if (g_rt.upscaler == Upscaler::Fsr1) {
@@ -635,12 +876,35 @@ void formatStatusLocked(char* out, size_t n) {
         std::snprintf(resBuf, sizeof(resBuf), "%.2fx %s", g_rt.scale, presetLabel(g_rt.scale, g_rt.presetIdx));
     }
 
-    // --- Line 2: FPS and CPU ---
-    char fpsBuf[64] = "";
-    if (g_rt.adaptive) {
-        std::snprintf(fpsBuf, sizeof(fpsBuf), "FPS %.0f (tgt:%.0f)   CPU %s", g_metrics.fps, g_rt.targetFps, cpu);
+    // --- Line 2: FPS, CPU, Temp & Fan ---
+    char fanBuf[48] = "";
+    if (g_fanWorker.hasNbfc) {
+        if (g_rt.fanMode == FanMode::Auto) {
+            std::snprintf(fanBuf, sizeof(fanBuf), " \006FAN \002AUTO");
+        } else if (g_rt.fanMode == FanMode::AutoOpt) {
+            std::snprintf(fanBuf, sizeof(fanBuf), " \006FAN \002OPT \006(%d%%)",
+                          g_rt.fanPct > 0 ? g_rt.fanPct : 50);
+        } else {
+            std::snprintf(fanBuf, sizeof(fanBuf), " \006FAN \002%s \006(%d%%)",
+                          fanModeName(g_rt.fanMode), g_rt.fanPct);
+        }
+    }
+
+    char cpuBuf[48] = "";
+    if (g_metrics.cpuTempC > 0) {
+        std::snprintf(cpuBuf, sizeof(cpuBuf), " \006CPU \001%s %s%dC", cpu,
+                      tempColor(g_metrics.cpuTempC), g_metrics.cpuTempC);
     } else {
-        std::snprintf(fpsBuf, sizeof(fpsBuf), "FPS %.0f   CPU %s", g_metrics.fps, cpu);
+        std::snprintf(cpuBuf, sizeof(cpuBuf), " \006CPU \001%s", cpu);
+    }
+
+    char line2[160] = "";
+    if (g_rt.adaptive) {
+        std::snprintf(line2, sizeof(line2), "\006FPS \003%.0f \006(tgt:%.0f)%s%s",
+                      g_metrics.fps, g_rt.targetFps, cpuBuf, fanBuf);
+    } else {
+        std::snprintf(line2, sizeof(line2), "\006FPS \003%.0f%s%s",
+                      g_metrics.fps, cpuBuf, fanBuf);
     }
 
     // --- Line 3: Both GPUs (dGPU and iGPU with names, load, temp, VRAM) ---
@@ -648,48 +912,50 @@ void formatStatusLocked(char* out, size_t n) {
     for (int i = 0; i < g_metrics.gpuN; ++i) {
         auto& g = g_metrics.gpus[i];
         const char* tag = g.tag;
-        const char* name = g.name;
+        char cleanName[64] = "";
         if (std::strcmp(g.tag, "dGPU") == 0) {
-            if (g_rt.dgpuIsDiscrete && g_rt.dgpuName[0]) {
-                const char* s = g_rt.dgpuName;
-                if (std::strncmp(s, "NVIDIA GeForce ", 15) == 0) s += 15;
-                else if (std::strncmp(s, "NVIDIA ", 7) == 0) s += 7;
-                name = s;
-            }
+            const char* s = (g_rt.dgpuIsDiscrete && g_rt.dgpuName[0]) ? g_rt.dgpuName : g.name;
+            cleanGpuName(cleanName, sizeof(cleanName), s);
         } else if (std::strcmp(g.tag, "iGPU") == 0) {
             const char* s = g_rt.igpuName[0]
                                 ? g_rt.igpuName
                                 : ((!g_rt.dgpuIsDiscrete && g_rt.dgpuName[0]) ? g_rt.dgpuName : g.name);
-            if (std::strncmp(s, "AMD Radeon ", 11) == 0) s += 11;
-            else if (std::strncmp(s, "AMD ", 4) == 0) s += 4;
-            name = s;
+            cleanGpuName(cleanName, sizeof(cleanName), s);
+        } else {
+            cleanGpuName(cleanName, sizeof(cleanName), g.name);
         }
+        const char* name = cleanName;
 
-        char piece[128] = "";
-        char metricsPart[64] = "";
+        char piece[256] = "";
+        char metricsPart[128] = "";
+        const char* tc = tempColor(g.tempC);
         if (g.loadPct >= 0 && g.tempC >= 0 && g.vramUsedMb >= 0) {
-            std::snprintf(metricsPart, sizeof(metricsPart), ": %d%% %dC %dMB", g.loadPct, g.tempC, g.vramUsedMb);
+            std::snprintf(metricsPart, sizeof(metricsPart), ": \001%d%% %s%dC \006%dMB",
+                          g.loadPct, tc, g.tempC, g.vramUsedMb);
         } else if (g.loadPct >= 0 && g.tempC >= 0) {
-            std::snprintf(metricsPart, sizeof(metricsPart), ": %d%% %dC", g.loadPct, g.tempC);
+            std::snprintf(metricsPart, sizeof(metricsPart), ": \001%d%% %s%dC",
+                          g.loadPct, tc, g.tempC);
         } else if (g.loadPct >= 0 && g.vramUsedMb >= 0) {
-            std::snprintf(metricsPart, sizeof(metricsPart), ": %d%% %dMB", g.loadPct, g.vramUsedMb);
+            std::snprintf(metricsPart, sizeof(metricsPart), ": \001%d%% \006%dMB",
+                          g.loadPct, g.vramUsedMb);
         } else if (g.loadPct >= 0) {
-            std::snprintf(metricsPart, sizeof(metricsPart), ": %d%%", g.loadPct);
+            std::snprintf(metricsPart, sizeof(metricsPart), ": \001%d%%", g.loadPct);
         } else if (g.tempC >= 0) {
-            std::snprintf(metricsPart, sizeof(metricsPart), ": %dC", g.tempC);
+            std::snprintf(metricsPart, sizeof(metricsPart), ": %s%dC", tc, g.tempC);
         }
 
-        if (i > 0) std::strncat(gpuBuf, " | ", sizeof(gpuBuf) - std::strlen(gpuBuf) - 1);
-        std::snprintf(piece, sizeof(piece), "%s [%s]%s", tag, name, metricsPart);
+        if (i > 0) std::strncat(gpuBuf, " \006| ", sizeof(gpuBuf) - std::strlen(gpuBuf) - 1);
+        std::snprintf(piece, sizeof(piece), "%s%s \001[%.24s]%.60s",
+                      (std::strcmp(tag, "dGPU") == 0 ? "\002" : "\007"), tag, name, metricsPart);
         std::strncat(gpuBuf, piece, sizeof(gpuBuf) - std::strlen(gpuBuf) - 1);
     }
 
     if (gpuBuf[0]) {
-        std::snprintf(out, n, "EdgeScale [%s] %s | %s\n%s\n%s",
-                      modeLabel, upscalerBuf, resBuf, fpsBuf, gpuBuf);
+        std::snprintf(out, n, "\002EdgeScale \007[%s] \002%s \006| \001%s\n%s\n%s",
+                      modeLabel, upscalerBuf, resBuf, line2, gpuBuf);
     } else {
-        std::snprintf(out, n, "EdgeScale [%s] %s | %s\n%s",
-                      modeLabel, upscalerBuf, resBuf, fpsBuf);
+        std::snprintf(out, n, "\002EdgeScale \007[%s] \002%s \006| \001%s\n%s",
+                      modeLabel, upscalerBuf, resBuf, line2);
     }
 }
 
@@ -701,6 +967,74 @@ void armToastLocked(const char* msg) {
     }
     g_rt.toastUntil = std::chrono::steady_clock::now() + std::chrono::seconds(3);
     std::fprintf(stderr, "[xfsr] %s\n", g_rt.toast);
+}
+
+void setFanModeLocked(FanMode mode, int customPct = -1) {
+    g_rt.fanMode = mode;
+    int target = -1;
+    char toast[96]{};
+    switch (mode) {
+    case FanMode::Auto:
+        target = -1;
+        g_rt.fanPct = -1;
+        std::snprintf(toast, sizeof(toast), "fan: AUTO (EC default)");
+        break;
+    case FanMode::AutoOpt:
+        target = -1;
+        g_rt.fanPct = -1;
+        std::snprintf(toast, sizeof(toast), "fan: AUTO-OPT (temp-reactive)");
+        break;
+    case FanMode::Balanced:
+        target = (customPct > 0) ? customPct : 75;
+        g_rt.fanPct = target;
+        std::snprintf(toast, sizeof(toast), "fan: BALANCED (%d%%)", target);
+        break;
+    case FanMode::Max:
+        target = 100;
+        g_rt.fanPct = 100;
+        std::snprintf(toast, sizeof(toast), "fan: MAX (100%% - no throttle)");
+        break;
+    case FanMode::Quiet:
+        target = (customPct > 0) ? customPct : 50;
+        g_rt.fanPct = target;
+        std::snprintf(toast, sizeof(toast), "fan: QUIET (%d%%)", target);
+        break;
+    case FanMode::Custom:
+        target = std::clamp(customPct, 10, 100);
+        g_rt.fanPct = target;
+        std::snprintf(toast, sizeof(toast), "fan: %d%%", target);
+        break;
+    }
+    if (mode != FanMode::AutoOpt) {
+        g_fanWorker.apply(target);
+    }
+    armToastLocked(toast);
+}
+
+void cycleFanModeLocked() {
+    if (!g_fanWorker.hasNbfc) {
+        armToastLocked("fan control: nbfc not found");
+        return;
+    }
+    switch (g_rt.fanMode) {
+    case FanMode::Auto:
+        setFanModeLocked(FanMode::AutoOpt, -1);
+        break;
+    case FanMode::AutoOpt:
+        setFanModeLocked(FanMode::Balanced, 75);
+        break;
+    case FanMode::Balanced:
+        setFanModeLocked(FanMode::Max, 100);
+        break;
+    case FanMode::Max:
+        setFanModeLocked(FanMode::Quiet, 50);
+        break;
+    case FanMode::Quiet:
+    case FanMode::Custom:
+    default:
+        setFanModeLocked(FanMode::Auto, -1);
+        break;
+    }
 }
 
 void setOffloadLocked(bool on) {
@@ -934,8 +1268,18 @@ KeyBits readKeysWin32() {
     k.f3 = (GetAsyncKeyState(VK_F3) & 0x8000) != 0;
     k.f4 = (GetAsyncKeyState(VK_F4) & 0x8000) != 0;
     k.f5 = (GetAsyncKeyState(VK_F5) & 0x8000) != 0;
+    k.f6 = (GetAsyncKeyState(VK_F6) & 0x8000) != 0;
     k.f10 = (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
     k.shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+    k.ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+    k.alt = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+    k.ins = (GetAsyncKeyState(VK_INSERT) & 0x8000) != 0;
+    k.del = (GetAsyncKeyState(VK_DELETE) & 0x8000) != 0;
+    k.home = (GetAsyncKeyState(VK_HOME) & 0x8000) != 0;
+    k.end = (GetAsyncKeyState(VK_END) & 0x8000) != 0;
+    k.pgup = (GetAsyncKeyState(VK_PRIOR) & 0x8000) != 0;
+    k.pgdn = (GetAsyncKeyState(VK_NEXT) & 0x8000) != 0;
+    k.pause = (GetAsyncKeyState(VK_PAUSE) & 0x8000) != 0;
     return k;
 }
 #else
@@ -974,9 +1318,21 @@ bool ensureX11() {
     g_x11.kcF3 = g_x11.KeysymToKeycode(g_x11.dpy, kXK_F3);
     g_x11.kcF4 = g_x11.KeysymToKeycode(g_x11.dpy, kXK_F4);
     g_x11.kcF5 = g_x11.KeysymToKeycode(g_x11.dpy, kXK_F5);
+    g_x11.kcF6 = g_x11.KeysymToKeycode(g_x11.dpy, kXK_F6);
     g_x11.kcF10 = g_x11.KeysymToKeycode(g_x11.dpy, kXK_F10);
     g_x11.kcShiftL = g_x11.KeysymToKeycode(g_x11.dpy, kXK_Shift_L);
     g_x11.kcShiftR = g_x11.KeysymToKeycode(g_x11.dpy, kXK_Shift_R);
+    g_x11.kcCtrlL = g_x11.KeysymToKeycode(g_x11.dpy, kXK_Control_L);
+    g_x11.kcCtrlR = g_x11.KeysymToKeycode(g_x11.dpy, kXK_Control_R);
+    g_x11.kcAltL = g_x11.KeysymToKeycode(g_x11.dpy, kXK_Alt_L);
+    g_x11.kcAltR = g_x11.KeysymToKeycode(g_x11.dpy, kXK_Alt_R);
+    g_x11.kcIns = g_x11.KeysymToKeycode(g_x11.dpy, kXK_Insert);
+    g_x11.kcDel = g_x11.KeysymToKeycode(g_x11.dpy, kXK_Delete);
+    g_x11.kcHome = g_x11.KeysymToKeycode(g_x11.dpy, kXK_Home);
+    g_x11.kcEnd = g_x11.KeysymToKeycode(g_x11.dpy, kXK_End);
+    g_x11.kcPgUp = g_x11.KeysymToKeycode(g_x11.dpy, kXK_Page_Up);
+    g_x11.kcPgDn = g_x11.KeysymToKeycode(g_x11.dpy, kXK_Page_Down);
+    g_x11.kcPause = g_x11.KeysymToKeycode(g_x11.dpy, kXK_Pause);
     g_x11.ready = true;
     return true;
 }
@@ -1036,8 +1392,18 @@ KeyBits readKeysX11() {
     k.f3 = xKeyDown(keys, g_x11.kcF3);
     k.f4 = xKeyDown(keys, g_x11.kcF4);
     k.f5 = xKeyDown(keys, g_x11.kcF5);
+    k.f6 = xKeyDown(keys, g_x11.kcF6);
     k.f10 = xKeyDown(keys, g_x11.kcF10);
     k.shift = xKeyDown(keys, g_x11.kcShiftL) || xKeyDown(keys, g_x11.kcShiftR);
+    k.ctrl = xKeyDown(keys, g_x11.kcCtrlL) || xKeyDown(keys, g_x11.kcCtrlR);
+    k.alt = xKeyDown(keys, g_x11.kcAltL) || xKeyDown(keys, g_x11.kcAltR);
+    k.ins = xKeyDown(keys, g_x11.kcIns);
+    k.del = xKeyDown(keys, g_x11.kcDel);
+    k.home = xKeyDown(keys, g_x11.kcHome);
+    k.end = xKeyDown(keys, g_x11.kcEnd);
+    k.pgup = xKeyDown(keys, g_x11.kcPgUp);
+    k.pgdn = xKeyDown(keys, g_x11.kcPgDn);
+    k.pause = xKeyDown(keys, g_x11.kcPause);
     return k;
 }
 
@@ -1056,8 +1422,18 @@ KeyBits readKeysEvdev() {
     k.f3 = evKeyDown(bits, KEY_F3);
     k.f4 = evKeyDown(bits, KEY_F4);
     k.f5 = evKeyDown(bits, KEY_F5);
+    k.f6 = evKeyDown(bits, KEY_F6);
     k.f10 = evKeyDown(bits, KEY_F10);
     k.shift = evKeyDown(bits, KEY_LEFTSHIFT) || evKeyDown(bits, KEY_RIGHTSHIFT);
+    k.ctrl = evKeyDown(bits, KEY_LEFTCTRL) || evKeyDown(bits, KEY_RIGHTCTRL);
+    k.alt = evKeyDown(bits, KEY_LEFTALT) || evKeyDown(bits, KEY_RIGHTALT);
+    k.ins = evKeyDown(bits, KEY_INSERT);
+    k.del = evKeyDown(bits, KEY_DELETE);
+    k.home = evKeyDown(bits, KEY_HOME);
+    k.end = evKeyDown(bits, KEY_END);
+    k.pgup = evKeyDown(bits, KEY_PAGEUP);
+    k.pgdn = evKeyDown(bits, KEY_PAGEDOWN);
+    k.pause = evKeyDown(bits, KEY_PAUSE);
     return k;
 }
 
@@ -1068,15 +1444,102 @@ KeyBits mergeKeys(const KeyBits& a, const KeyBits& b) {
     k.f3 = a.f3 || b.f3;
     k.f4 = a.f4 || b.f4;
     k.f5 = a.f5 || b.f5;
+    k.f6 = a.f6 || b.f6;
     k.f10 = a.f10 || b.f10;
     k.shift = a.shift || b.shift;
+    k.ctrl = a.ctrl || b.ctrl;
+    k.alt = a.alt || b.alt;
+    k.ins = a.ins || b.ins;
+    k.del = a.del || b.del;
+    k.home = a.home || b.home;
+    k.end = a.end || b.end;
+    k.pgup = a.pgup || b.pgup;
+    k.pgdn = a.pgdn || b.pgdn;
+    k.pause = a.pause || b.pause;
     return k;
 }
 #endif
 
-void applyHotkeyActions(const KeyBits& cur, const KeyBits& prev, bool modOk) {
-    if (!modOk) return;
+void applyHotkeyActions(const KeyBits& cur, const KeyBits& prev, HotkeyMode mode) {
+    if (mode == HotkeyMode::None) return;
     auto rise = [](bool now, bool was) { return now && !was; };
+
+    // Navigation cluster mode: Insert/Home/PgUp/Del/End/PgDn/Pause
+    if (mode == HotkeyMode::Nav) {
+        if (rise(cur.ins, prev.ins)) {
+            applyPresetIdxLocked((g_rt.presetIdx + 1) % kPresetCount, true);
+        }
+        if (rise(cur.home, prev.home)) {
+            if (g_rt.upscaler == Upscaler::Edge) {
+                g_rt.edgeMode = (g_rt.edgeMode + 1) % 4;
+                g_rt.edgePerf = (g_rt.edgeMode == 1);
+                const char* mname = (g_rt.edgeMode == 3) ? "competitive" :
+                                    ((g_rt.edgeMode == 2) ? "nearest" : (g_rt.edgeMode == 1 ? "perf" : "quality"));
+                setenv("EDGESCALE_EDGE_MODE", mname, 1);
+                setenv("XFSR_EDGE_MODE", mname, 1);
+                const char* label = (g_rt.edgeMode == 3) ? "edge competitive (lowest latency)" :
+                                    ((g_rt.edgeMode == 2) ? "edge nearest (pixel art)" :
+                                    (g_rt.edgeMode == 1 ? "edge perf (lite)" : "edge quality"));
+                armToastLocked(label);
+            } else {
+                g_rt.rcas = !g_rt.rcas;
+                armToastLocked(g_rt.rcas ? "RCAS on" : "RCAS off (EASU only)");
+            }
+        }
+        if (rise(cur.pgup, prev.pgup)) {
+            if (g_rt.upscaler == Upscaler::Fsr1)
+                g_rt.upscaler = Upscaler::Blit;
+            else if (g_rt.upscaler == Upscaler::Blit)
+                g_rt.upscaler = Upscaler::Nearest;
+            else if (g_rt.upscaler == Upscaler::Nearest)
+                g_rt.upscaler = Upscaler::Nis;
+            else if (g_rt.upscaler == Upscaler::Nis)
+                g_rt.upscaler = Upscaler::Edge;
+            else
+                g_rt.upscaler = Upscaler::Fsr1;
+            setenv("XFSR_UPSCALER", upscalerName(g_rt.upscaler), 1);
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "upscaler %s", upscalerName(g_rt.upscaler));
+            armToastLocked(buf);
+        }
+        if (rise(cur.del, prev.del)) {
+            setOffloadLocked(!g_rt.offload);
+        }
+        if (rise(cur.end, prev.end)) {
+            setOneWayLocked(!g_rt.oneWay);
+        }
+        if (rise(cur.pgdn, prev.pgdn)) {
+            cycleFanModeLocked();
+        }
+        if (rise(cur.pause, prev.pause)) {
+            g_rt.overlayPinned = !g_rt.overlayPinned;
+            armToastLocked(g_rt.overlayPinned ? "overlay pinned" : "overlay unpinned");
+        }
+        return;
+    }
+
+    bool modOk = false;
+    switch (mode) {
+    case HotkeyMode::Shift:
+        modOk = cur.shift;
+        break;
+    case HotkeyMode::Alt:
+        modOk = cur.alt;
+        break;
+    case HotkeyMode::Ctrl:
+        modOk = cur.ctrl;
+        break;
+    case HotkeyMode::CtrlAlt:
+        modOk = cur.ctrl && cur.alt;
+        break;
+    case HotkeyMode::Bare:
+        modOk = true;
+        break;
+    default:
+        break;
+    }
+    if (!modOk) return;
+
     if (rise(cur.f1, prev.f1)) {
         applyPresetIdxLocked((g_rt.presetIdx + 1) % kPresetCount, true);
     }
@@ -1120,6 +1583,9 @@ void applyHotkeyActions(const KeyBits& cur, const KeyBits& prev, bool modOk) {
     if (rise(cur.f5, prev.f5)) {
         setOneWayLocked(!g_rt.oneWay);
     }
+    if (rise(cur.f6, prev.f6)) {
+        cycleFanModeLocked();
+    }
     if (rise(cur.f10, prev.f10)) {
         g_rt.overlayPinned = !g_rt.overlayPinned;
         armToastLocked(g_rt.overlayPinned ? "overlay pinned" : "overlay unpinned");
@@ -1127,14 +1593,14 @@ void applyHotkeyActions(const KeyBits& cur, const KeyBits& prev, bool modOk) {
 }
 
 void pollHotkeysLocked() {
+    if (g_rt.hotkeyMode == HotkeyMode::None) return;
 #if defined(_WIN32)
     const KeyBits cur = readKeysWin32();
     if (!g_rt.loggedKeys) {
         g_rt.loggedKeys = true;
         std::fprintf(stderr,
-                     "[edgescale] hotkeys: win32=yes mod=%s  "
-                     "(F1 preset F2 RCAS/edge-mode F3 FSR F4 offload F5 one-way F10 pin)\n",
-                     g_rt.requireMod ? "Shift+" : "none");
+                     "[edgescale] hotkeys: win32=yes mode=[%s]\n",
+                     hotkeyModeDescription(g_rt.hotkeyMode));
     }
 #else
     const KeyBits x11 = readKeysX11();
@@ -1143,29 +1609,16 @@ void pollHotkeysLocked() {
     if (!g_rt.loggedKeys) {
         g_rt.loggedKeys = true;
         std::fprintf(stderr,
-                     "[xfsr] hotkeys: x11=%s evdev=%s mod=%s  "
-                     "(F1 preset F2 RCAS/edge-mode F3 FSR F4 offload F5 one-way F10 pin)%s\n",
+                     "[edgescale] hotkeys: x11=%s evdev=%s mode=[%s]%s\n",
                      g_x11.ready ? "yes" : "no", g_evdev.anyOpen ? "yes" : "no",
-                     g_rt.requireMod ? "Shift+" : "none",
+                     hotkeyModeDescription(g_rt.hotkeyMode),
                      (!g_x11.ready && !g_evdev.anyOpen)
                          ? " - use control file if keys fail"
                          : "");
     }
 #endif
-    const bool modOk = !g_rt.requireMod || cur.shift;
-    applyHotkeyActions(cur, g_prevKeys, modOk);
+    applyHotkeyActions(cur, g_prevKeys, g_rt.hotkeyMode);
     g_prevKeys = cur;
-}
-
-void trimInPlace(char* s) {
-    if (!s) return;
-    char* a = s;
-    while (*a == ' ' || *a == '\t' || *a == '\r' || *a == '\n') ++a;
-    if (a != s) std::memmove(s, a, std::strlen(a) + 1);
-    size_t n = std::strlen(s);
-    while (n > 0 && (s[n - 1] == ' ' || s[n - 1] == '\t' || s[n - 1] == '\r' || s[n - 1] == '\n')) {
-        s[--n] = '\0';
-    }
 }
 
 void handleControlLineLocked(char* line) {
@@ -1356,6 +1809,45 @@ void handleControlLineLocked(char* line) {
             std::snprintf(toast, sizeof(toast), "target %.0f FPS", v);
             armToastLocked(toast);
         }
+    } else if (std::strcmp(cmd, "fan") == 0 || std::strcmp(cmd, "fan_mode") == 0) {
+        if (!arg[0] || std::strcmp(arg, "cycle") == 0 || std::strcmp(arg, "toggle") == 0) {
+            cycleFanModeLocked();
+        } else if (std::strcmp(arg, "auto") == 0 || std::strcmp(arg, "ec") == 0 || std::strcmp(arg, "0") == 0) {
+            setFanModeLocked(FanMode::Auto, -1);
+        } else if (std::strcmp(arg, "auto-opt") == 0 || std::strcmp(arg, "opt") == 0 ||
+                   std::strcmp(arg, "optimized") == 0 || std::strcmp(arg, "reactive") == 0) {
+            setFanModeLocked(FanMode::AutoOpt, -1);
+        } else if (std::strcmp(arg, "max") == 0 || std::strcmp(arg, "100") == 0 || std::strcmp(arg, "turbo") == 0) {
+            setFanModeLocked(FanMode::Max, 100);
+        } else if (std::strcmp(arg, "balanced") == 0 || std::strcmp(arg, "game") == 0 || std::strcmp(arg, "75") == 0) {
+            setFanModeLocked(FanMode::Balanced, 75);
+        } else if (std::strcmp(arg, "quiet") == 0 || std::strcmp(arg, "silent") == 0 || std::strcmp(arg, "50") == 0) {
+            setFanModeLocked(FanMode::Quiet, 50);
+        } else {
+            int pct = std::atoi(arg);
+            if (pct >= 10 && pct <= 100) {
+                setFanModeLocked(FanMode::Custom, pct);
+            }
+        }
+    } else if (std::strcmp(cmd, "hotkeys") == 0) {
+        if (std::strcmp(arg, "none") == 0 || std::strcmp(arg, "off") == 0 || std::strcmp(arg, "0") == 0) {
+            g_rt.hotkeyMode = HotkeyMode::None;
+        } else if (std::strcmp(arg, "alt") == 0) {
+            g_rt.hotkeyMode = HotkeyMode::Alt;
+        } else if (std::strcmp(arg, "ctrl") == 0) {
+            g_rt.hotkeyMode = HotkeyMode::Ctrl;
+        } else if (std::strcmp(arg, "ctrl_alt") == 0 || std::strcmp(arg, "ctrlalt") == 0) {
+            g_rt.hotkeyMode = HotkeyMode::CtrlAlt;
+        } else if (std::strcmp(arg, "nav") == 0) {
+            g_rt.hotkeyMode = HotkeyMode::Nav;
+        } else if (std::strcmp(arg, "bare") == 0) {
+            g_rt.hotkeyMode = HotkeyMode::Bare;
+        } else {
+            g_rt.hotkeyMode = HotkeyMode::Shift;
+        }
+        char b[64];
+        std::snprintf(b, sizeof(b), "hotkeys: %s", hotkeyModeDescription(g_rt.hotkeyMode));
+        armToastLocked(b);
     } else if (std::strcmp(cmd, "status") == 0) {
         armToastLocked(nullptr);
     }
@@ -1430,49 +1922,132 @@ void ensureOverlayGpu(OverlayGpu* ov, DeviceContext* ctx, uint32_t w, uint32_t h
         return;
     }
     ov->lastText[0] = '\0';
+    ov->lastWrapW = 0;
 }
 
-void rasterizeText(uint8_t* pixels, uint32_t width, uint32_t height, const char* text) {
+struct TextLayout {
+    uint32_t boxW = 0;
+    uint32_t boxH = 0;
+};
+
+TextLayout computeLayout(const char* text, uint32_t maxWidth, uint32_t maxHeight) {
+    TextLayout l{};
+    const int startX = 14;
+    const int scale = 2;
+    const int charW = 8 * scale + 2; // 18px per glyph
+    int curX = startX;
+    uint32_t curLineW = 0;
+    uint32_t maxLineW = 0;
+    uint32_t physicalLines = 1;
+
+    for (const char* t = text; *t; ++t) {
+        const unsigned char uc = static_cast<unsigned char>(*t);
+        if (uc >= 1 && uc <= 7) continue; // color escape byte
+        if (*t == '\n') {
+            if (curLineW > maxLineW) maxLineW = curLineW;
+            curLineW = 0;
+            curX = startX;
+            physicalLines++;
+            continue;
+        }
+        if (curX + 8 * scale >= static_cast<int>(maxWidth)) {
+            // Soft wrap
+            if (curLineW > maxLineW) maxLineW = curLineW;
+            curLineW = 0;
+            curX = startX;
+            physicalLines++;
+        }
+        curX += charW;
+        curLineW += charW;
+    }
+    if (curLineW > maxLineW) maxLineW = curLineW;
+
+    l.boxW = std::min(maxWidth, maxLineW + 28u);
+    l.boxH = std::min(maxHeight, physicalLines * 22u + 18u);
+    return l;
+}
+
+void rasterizeText(uint8_t* pixels, uint32_t width, uint32_t height, const char* text, uint32_t wrapWidth = 0) {
     const size_t n = static_cast<size_t>(width) * height * 4u;
     std::memset(pixels, 0, n);
 
-    uint32_t maxLineChars = 0;
-    uint32_t lineChars = 0;
-    uint32_t lineCount = 1;
-    for (const char* p = text; *p; ++p) {
-        if (*p == '\n') {
-            if (lineChars > maxLineChars) maxLineChars = lineChars;
-            lineChars = 0;
-            lineCount++;
-        } else {
-            lineChars++;
-        }
-    }
-    if (lineChars > maxLineChars) maxLineChars = lineChars;
+    const uint32_t maxW = (wrapWidth > 0 && wrapWidth < width) ? wrapWidth : width;
+    const TextLayout layout = computeLayout(text, maxW, height);
+    const uint32_t boxW = layout.boxW;
+    const uint32_t boxH = layout.boxH;
+    constexpr int R = 6;
 
-    const uint32_t boxW = std::min(width, maxLineChars * 18u + 24u);
-    const uint32_t boxH = std::min(height, lineCount * 22u + 16u);
-
+    // Background: Dark obsidian slate glass card with rounded corners and glowing top accent bar
     for (uint32_t y = 0; y < boxH; ++y) {
         for (uint32_t x = 0; x < boxW; ++x) {
+            // Check rounded corners
+            int cx = (x < R) ? (R - x) : ((x >= boxW - R) ? (x - (boxW - R - 1)) : 0);
+            int cy = (y < R) ? (R - y) : ((y >= boxH - R) ? (y - (boxH - R - 1)) : 0);
+            if (cx > 0 && cy > 0 && (cx * cx + cy * cy > R * R)) {
+                continue; // outside rounded corner: transparent
+            }
+
             uint8_t* p = pixels + (static_cast<size_t>(y) * width + x) * 4;
-            p[0] = 10;
-            p[1] = 12;
-            p[2] = 18;
-            p[3] = 210;
+
+            // Top glowing header line: horizontal gradient from Cyan (#22d3ee) to Violet (#a855f7)
+            if (y <= 1) {
+                float t = (boxW > 1) ? static_cast<float>(x) / static_cast<float>(boxW - 1) : 0.f;
+                p[0] = static_cast<uint8_t>(34.f * (1.f - t) + 168.f * t + 0.5f);
+                p[1] = static_cast<uint8_t>(211.f * (1.f - t) + 85.f * t + 0.5f);
+                p[2] = static_cast<uint8_t>(238.f * (1.f - t) + 247.f * t + 0.5f);
+                p[3] = 255;
+            } else if (x == 0 || x == boxW - 1 || y == boxH - 1) {
+                // Subtle 1px crisp card border
+                p[0] = 56;
+                p[1] = 189;
+                p[2] = 248;
+                p[3] = 65;
+            } else {
+                // Obsidian slate glass card
+                p[0] = 12;
+                p[1] = 16;
+                p[2] = 24;
+                p[3] = 235;
+            }
         }
     }
-    int x = 12;
-    int y = 10;
+
+    struct ColorRgb { uint8_t r, g, b; };
+    constexpr ColorRgb kColors[8] = {
+        {248, 250, 252}, // 0: fallback white
+        {248, 250, 252}, // 1: white
+        {56,  189, 248}, // 2: electric cyan
+        {74,  222, 128}, // 3: mint green
+        {251, 191, 36 }, // 4: warm amber
+        {248, 113, 113}, // 5: coral red
+        {148, 163, 184}, // 6: slate muted
+        {192, 132, 252}, // 7: neon violet
+    };
+    ColorRgb curColor = kColors[1];
+
+    const int startX = 14;
+    const int startY = 10;
+    int x = startX;
+    int y = startY;
     const int scale = 2;
+    const int charW = 8 * scale + 2;
+
     for (const char* t = text; *t; ++t) {
         char c = *t;
+        const unsigned char uc = static_cast<unsigned char>(c);
+        if (uc >= 1 && uc <= 7) {
+            curColor = kColors[uc];
+            continue;
+        }
         if (c == '\n') {
-            x = 12;
+            x = startX;
             y += 8 * scale + 6;
             continue;
         }
-        const unsigned char uc = static_cast<unsigned char>(c);
+        if (x + 8 * scale >= static_cast<int>(maxW)) {
+            x = startX;
+            y += 8 * scale + 6;
+        }
         if (uc < 32 || uc > 127) c = '?';
         const uint8_t* glyph = kFont8[static_cast<unsigned char>(c) - 32];
         for (int row = 0; row < 8; ++row) {
@@ -1483,24 +2058,35 @@ void rasterizeText(uint8_t* pixels, uint32_t width, uint32_t height, const char*
                     for (int sx = 0; sx < scale; ++sx) {
                         int px = x + col * scale + sx;
                         int py = y + row * scale + sy;
-                        if (px < 0 || py < 0 || px >= static_cast<int>(width) ||
-                            py >= static_cast<int>(height))
-                            continue;
-                        uint8_t* p =
-                            pixels + (static_cast<size_t>(py) * width + static_cast<size_t>(px)) * 4;
-                        p[0] = 90;
-                        p[1] = 255;
-                        p[2] = 160;
-                        p[3] = 255;
+
+                        // 1. Drop shadow offset by (+1, +1)
+                        int spx = px + 1;
+                        int spy = py + 1;
+                        if (spx >= 0 && spy >= 0 && spx < static_cast<int>(width) &&
+                            spy < static_cast<int>(height)) {
+                            uint8_t* sp = pixels + (static_cast<size_t>(spy) * width + static_cast<size_t>(spx)) * 4;
+                            if (sp[3] < 250) {
+                                sp[0] = 0;
+                                sp[1] = 0;
+                                sp[2] = 0;
+                                sp[3] = 220;
+                            }
+                        }
+
+                        // 2. Foreground glyph pixel
+                        if (px >= 0 && py >= 0 && px < static_cast<int>(width) &&
+                            py < static_cast<int>(height)) {
+                            uint8_t* p = pixels + (static_cast<size_t>(py) * width + static_cast<size_t>(px)) * 4;
+                            p[0] = curColor.r;
+                            p[1] = curColor.g;
+                            p[2] = curColor.b;
+                            p[3] = 255;
+                        }
                     }
                 }
             }
         }
-        x += 8 * scale + 2;
-        if (x + 8 * scale >= static_cast<int>(width)) {
-            x = 12;
-            y += 8 * scale + 6;
-        }
+        x += charW;
     }
 }
 
@@ -1589,9 +2175,38 @@ void initFromEnv() {
     // Default ON; XFSR_HUD=0 disables.
     g_rt.hudOn = !(hud && hud[0] == '0');
 
-    // Default: bare F-keys (no modifier). XFSR_HUD_MOD=1 requires Shift+F*.
-    const char* mod = std::getenv("XFSR_HUD_MOD");
-    g_rt.requireMod = (mod && mod[0] != '\0' && mod[0] != '0');
+    // Hotkeys mode: shift (default) | alt | ctrl | ctrl_alt | nav | bare | none
+    const char* hk = std::getenv("EDGESCALE_HOTKEYS");
+    if (!hk) hk = std::getenv("XFSR_HOTKEYS");
+    const char* mod = std::getenv("EDGESCALE_HUD_MOD");
+    if (!mod) mod = std::getenv("XFSR_HUD_MOD");
+
+    if (hk && hk[0]) {
+        if (std::strcmp(hk, "none") == 0 || std::strcmp(hk, "off") == 0 || std::strcmp(hk, "0") == 0) {
+            g_rt.hotkeyMode = HotkeyMode::None;
+        } else if (std::strcmp(hk, "alt") == 0) {
+            g_rt.hotkeyMode = HotkeyMode::Alt;
+        } else if (std::strcmp(hk, "ctrl") == 0) {
+            g_rt.hotkeyMode = HotkeyMode::Ctrl;
+        } else if (std::strcmp(hk, "ctrl_alt") == 0 || std::strcmp(hk, "ctrlalt") == 0) {
+            g_rt.hotkeyMode = HotkeyMode::CtrlAlt;
+        } else if (std::strcmp(hk, "nav") == 0) {
+            g_rt.hotkeyMode = HotkeyMode::Nav;
+        } else if (std::strcmp(hk, "bare") == 0) {
+            g_rt.hotkeyMode = HotkeyMode::Bare;
+        } else {
+            g_rt.hotkeyMode = HotkeyMode::Shift;
+        }
+    } else if (mod && mod[0]) {
+        if (mod[0] == '0') {
+            g_rt.hotkeyMode = HotkeyMode::Bare;
+        } else {
+            g_rt.hotkeyMode = HotkeyMode::Shift;
+        }
+    } else {
+        // Safe default: require Shift so in-game F1/F2 voting in games like CS2 never triggers!
+        g_rt.hotkeyMode = HotkeyMode::Shift;
+    }
 
     // Pin status strip at launch (Proton/Steam often eat F10). XFSR_OVERLAY=1 / --overlay.
     const char* ov = std::getenv("XFSR_OVERLAY");
@@ -1770,11 +2385,31 @@ void initFromEnv() {
 
     g_rt.lastScaleChange = std::chrono::steady_clock::now();
 
+    g_fanWorker.probe();
+    if (const char* fanEnv = xfsrEnv("EDGESCALE_FAN", "XFSR_FAN")) {
+        if (std::strcmp(fanEnv, "max") == 0 || std::strcmp(fanEnv, "100") == 0) {
+            setFanModeLocked(FanMode::Max, 100);
+        } else if (std::strcmp(fanEnv, "balanced") == 0 || std::strcmp(fanEnv, "75") == 0) {
+            setFanModeLocked(FanMode::Balanced, 75);
+        } else if (std::strcmp(fanEnv, "quiet") == 0 || std::strcmp(fanEnv, "50") == 0) {
+            setFanModeLocked(FanMode::Quiet, 50);
+        } else if (std::strcmp(fanEnv, "opt") == 0 || std::strcmp(fanEnv, "auto-opt") == 0) {
+            setFanModeLocked(FanMode::AutoOpt, -1);
+        } else if (std::strcmp(fanEnv, "auto") == 0 || std::strcmp(fanEnv, "ec") == 0) {
+            setFanModeLocked(FanMode::Auto, -1);
+        } else {
+            int pct = std::atoi(fanEnv);
+            if (pct >= 10 && pct <= 100) {
+                setFanModeLocked(FanMode::Custom, pct);
+            }
+        }
+    }
+
     if (g_rt.hudOn) {
         std::fprintf(stderr,
-                     "[xfsr] controls on: F1 preset F2 RCAS/edge-mode F3 FSR F4 offload F5 one-way F10 pin%s%s\n"
-                     "[xfsr] control file: %s  (preset|rcas|edge_sharp|edge_mode|fsr|offload|one-way|overlay|adaptive|status)\n",
-                     g_rt.requireMod ? " (hold Shift)" : "",
+                     "[edgescale] hotkeys: %s%s\n"
+                     "[edgescale] control file: %s (preset|edge_mode|fsr|offload|one-way|fan|overlay|adaptive|hotkeys|status)\n",
+                     hotkeyModeDescription(g_rt.hotkeyMode),
                      g_rt.overlayPinned ? " [overlay pinned]" : "", g_rt.controlPath);
         // Touch the control file so the path always exists for scripting.
         std::ofstream touch(g_rt.controlPath, std::ios::app);
@@ -1819,6 +2454,9 @@ Snapshot poll() {
         s.edgeSharpness = g_rt.edgeSharpness;
         s.edgePerf = g_rt.edgePerf;
         s.edgeMode = g_rt.edgeMode;
+        s.fanMode = g_rt.fanMode;
+        s.fanPct = g_rt.fanPct;
+        s.cpuTempC = g_metrics.cpuTempC;
         s.fsr = (g_rt.upscaler == Upscaler::Fsr1);
         s.offload = g_rt.offload;
         s.oneWay = g_rt.oneWay;
@@ -1826,8 +2464,13 @@ Snapshot poll() {
         formatStatusLocked(s.status, sizeof(s.status));
         return s;
     }
-    pollHotkeysLocked();
-    pollControlFileLocked();
+    static auto s_lastPoll = std::chrono::steady_clock::time_point{};
+    const auto now = std::chrono::steady_clock::now();
+    if (now - s_lastPoll >= std::chrono::milliseconds(16)) {
+        s_lastPoll = now;
+        pollHotkeysLocked();
+        pollControlFileLocked();
+    }
 
     s.scale = g_rt.scale;
     s.preset = kPresetNames[g_rt.presetIdx];
@@ -1836,6 +2479,9 @@ Snapshot poll() {
     s.edgeSharpness = g_rt.edgeSharpness;
     s.edgePerf = g_rt.edgePerf;
     s.edgeMode = g_rt.edgeMode;
+    s.fanMode = g_rt.fanMode;
+    s.fanPct = g_rt.fanPct;
+    s.cpuTempC = g_metrics.cpuTempC;
     s.fsr = (g_rt.upscaler == Upscaler::Fsr1);
     s.offload = g_rt.offload;
     s.oneWay = g_rt.oneWay;
@@ -1866,6 +2512,9 @@ Snapshot peek() {
     s.edgeSharpness = g_rt.edgeSharpness;
     s.edgePerf = g_rt.edgePerf;
     s.edgeMode = g_rt.edgeMode;
+    s.fanMode = g_rt.fanMode;
+    s.fanPct = g_rt.fanPct;
+    s.cpuTempC = g_metrics.cpuTempC;
     s.fsr = (g_rt.upscaler == Upscaler::Fsr1);
     s.offload = g_rt.offload;
     s.oneWay = g_rt.oneWay;
@@ -1876,6 +2525,12 @@ Snapshot peek() {
     s.retryOffload = g_rt.retryOffload;
     formatStatusLocked(s.status, sizeof(s.status));
     return s;
+}
+
+void setFanMode(FanMode mode, int customPct) {
+    initFromEnv();
+    std::lock_guard<std::mutex> lock(g_rt.mu);
+    setFanModeLocked(mode, customPct);
 }
 
 void clearRecreateRequest() {
@@ -1916,6 +2571,7 @@ void destroyOverlay(OverlayGpu* ov) {
     ov->stagingMem = VK_NULL_HANDLE;
     ov->stagingMapped = nullptr;
     ov->width = ov->height = 0;
+    ov->lastWrapW = 0;
     ov->lastText[0] = '\0';
     ov->ctx = nullptr;
 }
@@ -1926,7 +2582,7 @@ bool recordOverlay(OverlayGpu* ov, DeviceContext* ctx, VkCommandBuffer cmd, VkIm
     if (swapW < 64 || swapH < 32) return false;
 
     constexpr uint32_t kOw = 1600;
-    constexpr uint32_t kOh = 84;
+    constexpr uint32_t kOh = 160;
     ensureOverlayGpu(ov, ctx, kOw, kOh);
     if (!ov->stagingMapped || !ov->image.image) return false;
 
@@ -1934,11 +2590,15 @@ bool recordOverlay(OverlayGpu* ov, DeviceContext* ctx, VkCommandBuffer cmd, VkIm
     auto& d = ctx->vk;
     if (!d.CmdCopyBufferToImage || !d.CmdBlitImage) return false;
 
-    if (std::strncmp(ov->lastText, text, sizeof(ov->lastText)) != 0) {
+    const uint32_t screenMaxW = (swapW > 24u) ? (swapW - 24u) : ov->width;
+    const uint32_t wrapW = std::min(ov->width, screenMaxW);
+
+    if (std::strncmp(ov->lastText, text, sizeof(ov->lastText)) != 0 || ov->lastWrapW != wrapW) {
         std::vector<uint8_t> pixels(static_cast<size_t>(ov->width) * ov->height * 4u);
-        rasterizeText(pixels.data(), ov->width, ov->height, text);
+        rasterizeText(pixels.data(), ov->width, ov->height, text, wrapW);
         std::memcpy(ov->stagingMapped, pixels.data(), pixels.size());
         std::snprintf(ov->lastText, sizeof(ov->lastText), "%s", text);
+        ov->lastWrapW = wrapW;
 
         transition(ctx, cmd, ov->image.image, VK_IMAGE_LAYOUT_UNDEFINED,
                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
@@ -1956,22 +2616,9 @@ bool recordOverlay(OverlayGpu* ov, DeviceContext* ctx, VkCommandBuffer cmd, VkIm
                    VK_ACCESS_TRANSFER_READ_BIT);
     }
 
-    uint32_t maxLineChars = 0;
-    uint32_t lineChars = 0;
-    uint32_t lineCount = 1;
-    for (const char* p = text; *p; ++p) {
-        if (*p == '\n') {
-            if (lineChars > maxLineChars) maxLineChars = lineChars;
-            lineChars = 0;
-            lineCount++;
-        } else {
-            lineChars++;
-        }
-    }
-    if (lineChars > maxLineChars) maxLineChars = lineChars;
-
-    const uint32_t contentW = std::min(ov->width, maxLineChars * 18u + 24u);
-    const uint32_t contentH = std::min(ov->height, lineCount * 22u + 16u);
+    const TextLayout layout = computeLayout(text, wrapW, ov->height);
+    const uint32_t contentW = layout.boxW;
+    const uint32_t contentH = layout.boxH;
 
     // Bottom-left — top is usually MangoHud.
     const int32_t margin = 12;
@@ -1990,6 +2637,44 @@ bool recordOverlay(OverlayGpu* ov, DeviceContext* ctx, VkCommandBuffer cmd, VkIm
     d.CmdBlitImage(cmd, ov->image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, swapImage,
                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_NEAREST);
     return true;
+}
+
+const char* fanModeName(FanMode mode) {
+    switch (mode) {
+    case FanMode::Auto: return "AUTO";
+    case FanMode::AutoOpt: return "AUTO-OPT";
+    case FanMode::Balanced: return "BALANCED";
+    case FanMode::Max: return "MAX";
+    case FanMode::Quiet: return "QUIET";
+    case FanMode::Custom: return "CUSTOM";
+    default: return "AUTO";
+    }
+}
+
+const char* hotkeyModeName(HotkeyMode mode) {
+    switch (mode) {
+    case HotkeyMode::Shift: return "shift";
+    case HotkeyMode::Alt: return "alt";
+    case HotkeyMode::Ctrl: return "ctrl";
+    case HotkeyMode::CtrlAlt: return "ctrl_alt";
+    case HotkeyMode::Nav: return "nav";
+    case HotkeyMode::Bare: return "bare";
+    case HotkeyMode::None: return "none";
+    default: return "shift";
+    }
+}
+
+const char* hotkeyModeDescription(HotkeyMode mode) {
+    switch (mode) {
+    case HotkeyMode::Shift: return "Shift+F1..F6, Shift+F10 (safe default)";
+    case HotkeyMode::Alt: return "Alt+F1..F6, Alt+F10";
+    case HotkeyMode::Ctrl: return "Ctrl+F1..F6, Ctrl+F10";
+    case HotkeyMode::CtrlAlt: return "Ctrl+Alt+F1..F6, Ctrl+Alt+F10";
+    case HotkeyMode::Nav: return "Insert/Home/PgUp/Del/End/PgDn/Pause (no F-keys)";
+    case HotkeyMode::Bare: return "bare F1..F6, F10 (may conflict with in-game actions)";
+    case HotkeyMode::None: return "disabled";
+    default: return "Shift+F1..F6";
+    }
 }
 
 } // namespace xfsr_ctrl

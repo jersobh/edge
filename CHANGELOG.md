@@ -6,6 +6,61 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
 
+## [0.15.0] — 2026-11-10
+
+### Fixed
+
+- **In-Game Hotkey Conflict Isolation (CS2 / Competitive Voting & Buy Menu)**:
+  - Fixed severe bug where pressing bare `F1` (Vote YES / Console), `F2` (Vote NO), `F3` (Autobuy) in games like *Counter-Strike 2* triggered CrossVulkan swapchain recreation (`applyPresetIdxLocked`), causing sudden stutters or complete game freezes/crashes.
+  - Changed default hotkey modifier to **`Shift`** (`Shift+F1..F6`, `Shift+F10`), strictly ignoring bare `F1..F6` keypresses during normal gameplay.
+  - Added new hotkey mapping modes via `--hotkeys <shift|alt|ctrl|ctrl_alt|nav|bare|none>` and `--no-hotkeys` in [`scripts/edgerun`](file:///home/jeff/Projects/crossvulkan/scripts/edgerun) and `EDGESCALE_HOTKEYS`:
+    - `shift` (default): `Shift+F1..F6`, `Shift+F10`
+    - `alt`: `Alt+F1..F6`, `Alt+F10`
+    - `ctrl`: `Ctrl+F1..F6`, `Ctrl+F10`
+    - `ctrl_alt`: `Ctrl+Alt+F1..F6`, `Ctrl+Alt+F10`
+    - `nav`: Navigation cluster (`Insert` preset, `Home` mode, `PgUp` upscaler, `Del` offload, `End` 1-way, `PgDn` fan, `Pause` pin) avoiding function keys altogether
+    - `none`: Hotkey listener completely disabled (safest for competitive esports)
+    - `bare`: Bare `F1..F6` (legacy opt-in)
+  - Automatically enforces modifier isolation in `--competitive` / `--esports` mode so in-game votes or key binds never trigger layer actions.
+  - Added runtime hotkey switching via control file (`hotkeys <mode>`).
+
+- **HUD Overlay Layout & Automatic Dynamic Sizing**:
+  - Fixed overlay text wrapping and bottom-line clipping where line 1 wrapped (`(2.0` / `0x)`) and line 3 (`dGPU... | iGPU...`) was cut off at the card bottom.
+  - Implemented `computeLayout()` dynamically tracking text dimensions and soft wraps at the exact window/screen width boundary (`wrapW`), ensuring the card background, border, and swapchain blit rectangle perfectly enclose all rendered lines on any screen resolution.
+  - Increased maximum overlay height allocation `kOh` from 96px to 160px (supporting up to 6 physical lines with zero truncation).
+  - Streamlined line 1 format strings: `EdgeScale [HYBRID] edge:comp (CAS:0.60) | 960x540 -> 1920x1080 (2.0x)`.
+  - Added `cleanGpuName()` sanitizing long device strings: cleans driver tags and verbose suffixes (e.g. `AMD Radeon Vega 10 Graphics (RADV RAVEN)` -> `Vega 10`, `NVIDIA GeForce GTX 1650 with Max-Q Design` -> `GTX 1650`).
+
+## [0.14.0] — 2026-11-10
+
+### Added
+
+- **Hardware Fan Control & Anti-Throttling Engine (`F6` Hotkey & `--fan`)**:
+  - Integrated asynchronous, non-blocking fan curve control via `nbfc` (NoteBook FanControl) and EC controllers in [`layer/xfsr_controls.cpp`](file:///home/jeff/Projects/crossvulkan/layer/xfsr_controls.cpp) and [`scripts/edgerun`](file:///home/jeff/Projects/crossvulkan/scripts/edgerun).
+  - Added dedicated worker thread (`FanWorker`) ensuring `nbfc` commands never stall or jitter Vulkan present queues.
+  - Added live cycling on hotkey **`F6`**: cycles `AUTO (EC default)` -> `AUTO-OPT (temp-reactive)` -> `BALANCED (75%)` -> `MAX (100%)` -> `QUIET (50%)` -> `AUTO` with live in-game toasts.
+  - Added reactive dynamic curve in `AUTO-OPT` mode: dynamically adjusts fan speed based on peak temperature across CPU and all GPUs (100% at ≥78°C, 85% at ≥70°C, 70% at ≥62°C, 50% below 60°C) with hysteresis damping to eliminate fan thrashing.
+  - Added CLI flag `--fan auto|opt|balanced|max|quiet|<pct>` in [`scripts/edgerun`](file:///home/jeff/Projects/crossvulkan/scripts/edgerun) and control file command `fan <mode>` for runtime scripting.
+  - Automatically defaults to `opt` fan curve in `--competitive` / `--esports` mode to prevent CPU/GPU thermal throttling downclocks during competitive matches.
+- **CPU Thermal Observability**:
+  - Added automatic sysfs hardware monitor discovery (`discoverCpuTemp()`) scanning `k10temp` (AMD Ryzen), `coretemp` (Intel), `zenpower`, and ACPI thermal zones in sub-millisecond sysfs queries.
+  - Real-time CPU temperature integrated into HUD telemetry and auto-curve decision loop.
+- **Modern HUD Overlay Redesign**:
+  - Re-architected in-game HUD overlay in [`layer/xfsr_controls.cpp`](file:///home/jeff/Projects/crossvulkan/layer/xfsr_controls.cpp):
+    - Dark obsidian slate glass card (`rgba(12, 16, 24, 235)`) with rounded corners (radius 6px).
+    - Glowing top accent header bar featuring a horizontal gradient from Electric Cyan (`#22d3ee`) to Neon Violet (`#a855f7`).
+    - 1px crisp card outline border (`rgba(56, 189, 248, 65)`).
+    - Sub-pixel text drop shadows at `(+1, +1)` (`rgba(0, 0, 0, 220)`) before rendering glyph foregrounds, providing razor-sharp legibility across high-contrast in-game environments.
+    - Color-coded thermal indicators: cool (<65°C, mint green), warm (65-75°C, amber), hot (≥76°C, coral red).
+    - Multi-color typography highlighting modes, resolutions, FPS, CPU thermals, and fan status.
+
+### Optimized
+
+- **Present Thread Polling Rate Limiting**:
+  - Throttled synchronous hotkey polling (`XQueryKeymap`) and control file `stat()` polling in `poll()` to at most 60 Hz (~16ms intervals), eliminating redundant IPC roundtrips and filesystem syscalls at high framerates (120-200 FPS).
+- **Fast 1:1 Native Resolution Pass in EdgePass (`shaders/edge_pass.comp.glsl`)**:
+  - Added `edgeNative` fast path: when `renderSize == displaySize` (1080p -> 1080p native), heavy 12-tap Catmull-Rom cubic interpolation and sub-pixel edge tangent reconstruction are bypassed in favor of a fast 5-tap Contrast-Adaptive Sharpening (CAS) filter (or 1-tap sample if sharpness ≤ 0.01), reducing GPU compute time from ~1.0ms to <0.08ms.
+
 ## [0.13.1] — 2026-11-09
 
 ### Fixed
